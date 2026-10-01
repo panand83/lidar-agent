@@ -1,0 +1,11 @@
+# Local LiDAR settings may contain MQTT credentials.
+data/lidars.json
+data/*.tmp
+
+# Local development and browser-test artifacts.
+__pycache__/
+*.py[cod]
+.venv/
+.chrome-*/
+heading-check.png
+geometry-check.png
