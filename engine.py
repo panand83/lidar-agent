@@ -73,8 +73,6 @@ class LidarEngine:
         self.last_received = None
         self.error = None
         self.mqtt_status = "not_connected"
-        self.auto = None
-        self.auto_suggestion = None
         self.occupancy = {}
 
     def reconfigure(self, config):
@@ -309,53 +307,11 @@ class LidarEngine:
             track["time"] = timestamp
             track["history"].append(point)
             emitted.extend(self._evaluate(track, old, old_center, timestamp))
-            if self.auto is not None:
-                self.auto_observe(track)
         for key, track in list(self.tracks.items()):
             if timestamp - track["time"] > max_gap:
                 del self.tracks[key]
         emitted.extend(self._count_occupancy(timestamp))
         return emitted
 
-    def start_auto(self, settings):
-        self.auto = {"settings": settings, "tracks": {}, "started": time.time()}
-        self.auto_suggestion = None
-
-    def auto_observe(self, track):
-        settings = self.auto["settings"]
-        if settings.get("class_filter") and track["class"] not in settings["class_filter"]:
-            return
-        key = f'{track["frame"]}:{track["sensor"]}:{track["id"]}'
-        self.auto["tracks"][key] = list(track["history"])
-        self._maybe_finish_auto()
-
-    def _maybe_finish_auto(self):
-        settings = self.auto["settings"]
-        paths = [p for p in self.auto["tracks"].values() if len(p) >= int(settings.get("min_track_points", 6)) and distance(p[0], p[-1]) >= float(settings.get("min_displacement_m", 5))]
-        if len(paths) < int(settings.get("target_tracks", 8)) or sum(map(len, paths)) < int(settings.get("target_points", 100)):
-            return
-        self.auto_suggestion = self._suggest(paths)
-        self.auto = None
-
-    def _suggest(self, paths):
-        points = [point for path in paths for point in path]
-        pad = float(self.config.get("auto_padding_m", 2))
-        xmin, xmax = min(p[0] for p in points), max(p[0] for p in points)
-        ymin, ymax = min(p[1] for p in points), max(p[1] for p in points)
-        dx = sum(path[-1][0] - path[0][0] for path in paths)
-        dy = sum(path[-1][1] - path[0][1] for path in paths)
-        length = math.hypot(dx, dy) or 1
-        ux, uy = dx / length, dy / length
-        cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
-        width = max(xmax - xmin, ymax - ymin) * .35 + pad
-        line = [[cx - uy * width, cy + ux * width], [cx + uy * width, cy - ux * width]]
-        return {"roi_points": [[xmin - pad, ymin - pad], [xmax + pad, ymin - pad], [xmax + pad, ymax + pad], [xmin - pad, ymax + pad]], "line_points": line, "forward_hint": [cx + ux * 5, cy + uy * 5], "track_count": len(paths), "point_count": len(points), "confidence": round(min(1, len(paths) / 8), 2)}
-
     def snapshot(self):
-        auto = None
-        if self.auto is not None:
-            paths = list(self.auto["tracks"].values())
-            auto = {"running": True, "track_count": len(paths), "point_count": sum(map(len, paths)), "settings": self.auto["settings"]}
-        elif self.auto_suggestion:
-            auto = {"running": False, "suggestion": self.auto_suggestion}
-        return {"config": self.config, "status": {"messages": self.messages, "raw_in_last_message": self.raw_in_last_message, "valid_in_last_message": self.valid_in_last_message, "last_message": self.last_message, "last_received": self.last_received, "mqtt_status": self.mqtt_status, "error": self.error, "tracks": len(self.tracks)}, "tracks": [{"id": t["id"], "sensor": t["sensor"], "class": t["class"], "x": t["pos"][0], "y": t["pos"][1], "time": t["time"], "points": list(t["history"])} for t in self.tracks.values()], "events": list(self.events), "auto": auto}
+        return {"config": self.config, "status": {"messages": self.messages, "raw_in_last_message": self.raw_in_last_message, "valid_in_last_message": self.valid_in_last_message, "last_message": self.last_message, "last_received": self.last_received, "mqtt_status": self.mqtt_status, "error": self.error, "tracks": len(self.tracks)}, "tracks": [{"id": t["id"], "sensor": t["sensor"], "class": t["class"], "x": t["pos"][0], "y": t["pos"][1], "time": t["time"], "points": list(t["history"])} for t in self.tracks.values()], "events": list(self.events)}

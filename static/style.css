@@ -9,3 +9,13 @@ canvas.editing { cursor: crosshair; }
 .drawActions span { flex: 1 1 100%; color: var(--yellow); font-weight: 600; }
 .drawActions button:disabled { opacity: .5; cursor: default; }
 [hidden] { display: none !important; }
+.calibrationSteps{list-style:none;counter-reset:calibration;margin:0 0 14px;padding:0;display:grid;gap:7px}
+.calibrationSteps li{counter-increment:calibration;display:flex;align-items:center;gap:9px;color:var(--muted);font-size:12px}
+.calibrationSteps li::before{content:counter(calibration);width:23px;height:23px;flex:0 0 23px;display:grid;place-items:center;border:1px solid var(--border);border-radius:50%;font-weight:700}
+.calibrationSteps li.current{color:var(--text);font-weight:700}
+.calibrationSteps li.current::before{background:var(--blue);border-color:var(--blue)}
+.calibrationSteps li.done::before{content:'OK';background:#167f68;border-color:#167f68;color:#fff;font-size:9px}
+.calibrationPrompt{min-height:54px;line-height:1.45;color:var(--text);font-size:13px;margin-bottom:10px}
+#calibrationNext{width:100%;min-height:38px}
+#calibrationNext:disabled{opacity:.55;cursor:default}
+#captureStatus,#mapResult{color:var(--yellow);font-size:12px;line-height:1.4;margin:9px 0}

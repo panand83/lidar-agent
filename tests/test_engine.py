@@ -59,14 +59,6 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(a.tracks), 1)
         self.assertTrue(b.events)
 
-    def test_auto_suggestion(self):
-        engine = LidarEngine(config("a"))
-        engine.start_auto({"target_tracks": 1, "target_points": 3, "min_track_points": 3, "min_displacement_m": 2, "class_filter": ["car"]})
-        for seq, x in [(1, 0), (2, 2), (3, 4), (4, 6)]:
-            engine.process(frame(seq, x, 0))
-        self.assertIsNotNone(engine.auto_suggestion)
-        self.assertEqual(len(engine.auto_suggestion["roi_points"]), 4)
-
     def test_real_flasheye_payload_shape(self):
         sample_path = Path(__file__).resolve().parents[2] / "lidar-zone-starter" / "sample_tracking.json"
         sample = json.loads(sample_path.read_text(encoding="utf-8"))

@@ -279,24 +279,6 @@ class Handler(BaseHTTPRequestHandler):
                 if path[3] == "events-reset":
                     engine.reset_events()
                     return self.send_json({"ok": True})
-                if path[3] == "auto-start":
-                    engine.start_auto(data)
-                    return self.send_json({"ok": True})
-                if path[3] == "auto-reset":
-                    engine.auto = None
-                    engine.auto_suggestion = None
-                    return self.send_json({"ok": True})
-                if path[3] == "auto-apply":
-                    suggestion = engine.auto_suggestion
-                    if not suggestion:
-                        raise ValueError("No calibration suggestion")
-                    config = copy.deepcopy(engine.config)
-                    config["roi"] = suggestion["roi_points"]
-                    config["regions"].append({"id": "line-" + os.urandom(4).hex(), "name": str(data.get("name") or "Auto line"), "type": "line", "points": suggestion["line_points"], "forward_hint": suggestion["forward_hint"], "line_direction": "forward", "crossing_sensitivity_m": 0.35, "endpoint_padding_m": 0})
-                    engine.reconfigure(validate(config, lidar_id))
-                    engine.auto_suggestion = None
-                    save()
-                    return self.send_json({"ok": True})
                 if path[3] == "sample":
                     emitted = engine.process(data)
                     return self.send_json({"ok": True, "events": emitted})

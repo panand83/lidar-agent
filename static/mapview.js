@@ -3,6 +3,11 @@ let backgroundMap = null;
 let lidarMarker = null;
 let pickingReference = null;
 let mapLidarId = null;
+let referenceCapture = null;
+let captureLidarId = null;
+let captureLastTime = null;
+let captureSamples = [];
+let returnToCalibration = false;
 const xyScreen = screen;
 const xyWorld = world;
 const xyRender = renderCanvas;
@@ -40,13 +45,13 @@ function unprojectMap(latitude, longitude) {
 
 function initMap() {
   if (backgroundMap || typeof L === 'undefined') return;
-  backgroundMap = L.map('mapBackground', {zoomControl: false}).setView([0, 0], 2);
+  backgroundMap = L.map('mapBackground', {zoomControl: false, maxZoom: 22}).setView([0, 0], 2);
   L.control.zoom({position: 'bottomright'}).addTo(backgroundMap);
   const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-    maxZoom: 19, attribution: 'Tiles &copy; Esri and imagery contributors'
+    maxNativeZoom: 19, maxZoom: 22, attribution: 'Tiles &copy; Esri and imagery contributors'
   });
   const streets = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+    maxNativeZoom: 19, maxZoom: 22, attribution: '&copy; OpenStreetMap contributors'
   });
   satellite.addTo(backgroundMap);
   L.control.layers({'Satellite': satellite, 'Streets': streets}, null, {position: 'bottomleft'}).addTo(backgroundMap);
@@ -57,9 +62,11 @@ function initMap() {
     if (!point) return;
     point.lat = +event.latlng.lat.toFixed(8);
     point.lon = +event.latlng.lng.toFixed(8);
+    delete state.config.map_alignment.calibrated_at;
     pickingReference = null;
     dirty();
     renderControls();
+    renderCalibrationGuide();
     message('Map reference location captured');
   });
 }
@@ -193,9 +200,166 @@ function paintOverlay() {
     ctx.beginPath();
     ctx.arc(point[0], point[1], 5 * (devicePixelRatio || 1), 0, Math.PI * 2);
     ctx.fill();
+    drawTrackId(track, point);
   }
   if (state.draft.length) line(state.draft, '#ffd54f', 2, [5, 5]);
 }
+
+function drawTrackId(track, point) {
+  const ratio = devicePixelRatio || 1;
+  const label = String(track.id);
+  ctx.font = `${12 * ratio}px Segoe UI, Arial, sans-serif`;
+  const width = ctx.measureText(label).width + 8 * ratio;
+  const x = point[0] + 9 * ratio, y = point[1] - 17 * ratio;
+  ctx.fillStyle = '#07112de6';
+  ctx.fillRect(x, y, width, 19 * ratio);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(label, x + 4 * ratio, y + 13 * ratio);
+}
+
+function liveTracks() {
+  const snapshot = state.snapshot;
+  if (!snapshot || Date.now() / 1000 - snapshot.status.last_received > 3) return [];
+  return snapshot.tracks.filter(track => snapshot.status.last_message - track.time <= 2);
+}
+
+function trackKey(track) { return JSON.stringify([track.sensor, track.id]); }
+
+function completeReference(ref) {
+  return ['x', 'y', 'lat', 'lon'].every(key => typeof ref[key] === 'number' && Number.isFinite(ref[key])) &&
+    Math.abs(ref.lat) < 89.99 && Math.abs(ref.lon) <= 180;
+}
+
+function renderCalibrationGuide() {
+  const alignment = state.config?.map_alignment;
+  if (!alignment) return;
+  const refs = alignment.control_points || [];
+  const complete = refs.filter(completeReference).length;
+  const unpaired = refs.findIndex(ref => !completeReference(ref));
+  const fitted = !!alignment.calibrated_at;
+  const steps = ['Set map view', 'Capture object', 'Pair location', 'Calculate alignment', 'Save'];
+  let stage, prompt, action, disabled = false;
+  if (!currentGeo()) {
+    stage = 0; prompt = 'Enter the LiDAR latitude and longitude in Map Alignment, then apply the map view.';
+    action = 'Open Map Alignment';
+  } else if (unpaired >= 0) {
+    stage = 2; prompt = `Reference ${unpaired + 1} needs the matching GPS latitude and longitude. Enter them below or pick the exact location on the map.`;
+    if (pickingReference === unpaired) prompt = `Click the matching location for reference ${unpaired + 1} on the background map.`;
+    action = pickingReference === unpaired ? 'Waiting for map click' : 'Pick location on map';
+    disabled = pickingReference === unpaired;
+  } else if (complete < 3) {
+    stage = complete ? 1 : 1;
+    prompt = `${complete} of 3 references paired. Stop the car at a distinct location, select its live ID, and capture it. Spread the stops across the area, not one straight line.`;
+    action = referenceCapture ? 'Sampling stopped object' : 'Capture selected object';
+    disabled = !!referenceCapture || !liveTracks().length;
+    if (!referenceCapture && !liveTracks().length) prompt += ' Waiting for a live MQTT track.';
+  } else if (!fitted) {
+    stage = 3; prompt = `${complete} references paired. Calculate the alignment, then check its fit error and whether the tracks line up with the map.`;
+    action = 'Calculate alignment';
+  } else if (state.dirty) {
+    stage = 4; prompt = `Alignment calculated${alignment.fit_error_m == null ? '' : ` (fit error ${alignment.fit_error_m.toFixed(2)} m)`}. Check the map, then save the calibration for this LiDAR.`;
+    action = 'Save calibration';
+  } else {
+    stage = 5; prompt = `Calibration saved for this LiDAR${alignment.fit_error_m == null ? '' : `; fit error ${alignment.fit_error_m.toFixed(2)} m`}.`;
+    action = 'Saved'; disabled = true;
+  }
+  $('calibrationSteps').replaceChildren(...steps.map((name, index) => {
+    const item = document.createElement('li');
+    item.className = index < stage ? 'done' : index === stage ? 'current' : '';
+    item.textContent = name;
+    return item;
+  }));
+  $('calibrationPrompt').textContent = prompt;
+  $('calibrationNext').textContent = action;
+  $('calibrationNext').disabled = disabled;
+  $('calibrationNext').dataset.stage = String(stage);
+}
+
+$('calibrationNext').onclick = () => {
+  const stage = Number($('calibrationNext').dataset.stage);
+  if (stage === 0) { returnToCalibration = true; setTab('map'); }
+  else if (stage === 1) $('captureReference').click();
+  else if (stage === 2) {
+    const index = state.config.map_alignment.control_points.findIndex(ref => !completeReference(ref));
+    $('controlList').children[index]?.querySelector('.pickMapReference')?.click();
+  } else if (stage === 3) $('applyMap').click();
+  else if (stage === 4) $('save').click();
+};
+
+function updateCaptureTracks() {
+  if (captureLidarId !== state.id) {
+    captureLidarId = state.id;
+    pickingReference = null;
+    returnToCalibration = false;
+    referenceCapture = null;
+    captureSamples = [];
+    captureLastTime = null;
+    $('captureStatus').textContent = '';
+  }
+  const selector = $('captureTrack');
+  const selected = selector.value;
+  const tracks = liveTracks();
+  selector.replaceChildren(...tracks.map(track => {
+    const option = document.createElement('option');
+    option.value = trackKey(track);
+    option.textContent = `${track.class} ${track.id}${track.sensor ? ` (${track.sensor})` : ''}`;
+    return option;
+  }));
+  if (tracks.some(track => trackKey(track) === selected)) selector.value = selected;
+  $('captureReference').disabled = !tracks.length || !!referenceCapture;
+  $('cancelCapture').hidden = !referenceCapture;
+  if (!referenceCapture) return;
+  const track = tracks.find(item => trackKey(item) === referenceCapture.key);
+  if (!track) {
+    cancelReferenceCapture('Track lost; no reference was saved.');
+    return;
+  }
+  if (track.time === captureLastTime) return;
+  captureLastTime = track.time;
+  captureSamples.push([track.x, track.y]);
+  const scale = Number(currentGeo()?.scale) || 1;
+  const spread = Math.max(...captureSamples.map(point =>
+    Math.hypot(point[0] - captureSamples[0][0], point[1] - captureSamples[0][1]))) / scale;
+  if (spread > 0.75) {
+    cancelReferenceCapture('Object moved more than 0.75 m; stop and try again.');
+    return;
+  }
+  $('captureStatus').textContent = `Checking stopped position: ${captureSamples.length}/3 fresh samples`;
+  renderCalibrationGuide();
+  if (captureSamples.length < 3) return;
+  const x = captureSamples.reduce((sum, point) => sum + point[0], 0) / captureSamples.length;
+  const y = captureSamples.reduce((sum, point) => sum + point[1], 0) / captureSamples.length;
+  state.config.map_alignment.control_points.push({x: +x.toFixed(3), y: +y.toFixed(3), lat: null, lon: null});
+  dirty();
+  renderControls();
+  cancelReferenceCapture(`Captured ${referenceCapture.label} at X ${x.toFixed(2)}, Y ${y.toFixed(2)}. Enter GPS coordinates or use Pick on map.`);
+}
+
+function cancelReferenceCapture(status) {
+  referenceCapture = null;
+  captureSamples = [];
+  captureLastTime = null;
+  $('captureStatus').textContent = status;
+  $('cancelCapture').hidden = true;
+  $('captureReference').disabled = !liveTracks().length;
+  renderCalibrationGuide();
+}
+
+$('captureReference').onclick = () => {
+  if (!state.config) return;
+  const track = liveTracks().find(item => trackKey(item) === $('captureTrack').value);
+  if (!track) return message('Select a live object first');
+  captureLidarId = state.id;
+  referenceCapture = {key: trackKey(track), label: `${track.class} ${track.id}`};
+  captureSamples = [];
+  captureLastTime = null;
+  $('cancelCapture').hidden = false;
+  $('captureReference').disabled = true;
+  $('captureStatus').textContent = 'Waiting for three fresh, stationary samples';
+  updateCaptureTracks();
+  renderCalibrationGuide();
+};
+$('cancelCapture').onclick = () => cancelReferenceCapture('Capture cancelled.');
 
 function insideMapPolygon(point, polygon) {
   let inside = false;
@@ -209,7 +373,17 @@ function insideMapPolygon(point, polygon) {
 
 renderCanvas = function () {
   if (!currentGeo() || (backgroundMap && !$('mapBackground').hidden)) paintOverlay();
-  else xyRender();
+  else {
+    xyRender();
+    for (const track of liveTracks()) drawTrackId(track, screen([track.x, track.y]));
+  }
+};
+
+const basePoll = poll;
+poll = async function () {
+  await basePoll();
+  updateCaptureTracks();
+  renderCalibrationGuide();
 };
 
 fit = function () {
@@ -259,6 +433,7 @@ renderFields = function () {
   }
   $('geoYDirection').value = geo?.y_direction || 'left';
   syncMap();
+  renderCalibrationGuide();
 };
 
 $('applyGeo').onclick = () => {
@@ -278,8 +453,14 @@ $('applyGeo').onclick = () => {
     return;
   }
   state.config.map_alignment.geo = geo;
+  delete state.config.map_alignment.calibrated_at;
   dirty();
   syncMap(true);
+  renderCalibrationGuide();
+  if (returnToCalibration) {
+    returnToCalibration = false;
+    setTab('calibration');
+  }
   message('Map view applied. Save to keep it.');
 };
 
@@ -287,23 +468,40 @@ const baseRenderControls = renderControls;
 renderControls = function () {
   baseRenderControls();
   [...$('controlList').children].forEach((row, index) => {
+    row.querySelectorAll('input').forEach(input => input.addEventListener('change', () => {
+      delete state.config.map_alignment.calibrated_at;
+      renderCalibrationGuide();
+    }));
+    row.querySelector('button').addEventListener('click', () => {
+      delete state.config.map_alignment.calibrated_at;
+      renderCalibrationGuide();
+    });
     const pick = document.createElement('button');
+    pick.className = 'pickMapReference';
     pick.textContent = 'Pick on map';
     pick.onclick = () => {
       if (!currentGeo()) return message('Apply LiDAR coordinates first');
       pickingReference = index;
       mode('pan');
       message('Click the matching location on the map');
+      renderCalibrationGuide();
     };
     row.append(pick);
   });
+};
+
+const addControlPoint = $('addControlRow').onclick;
+$('addControlRow').onclick = () => {
+  addControlPoint();
+  delete state.config.map_alignment.calibrated_at;
+  renderCalibrationGuide();
 };
 
 $('applyMap').onclick = () => {
   if (!state.config) return;
   const refs = state.config.map_alignment.control_points;
   if (refs.length < 3) return message('Use at least three reference points');
-  if (refs.some(ref => !['x', 'y', 'lat', 'lon'].every(key => Number.isFinite(ref[key])))) {
+  if (refs.some(ref => !completeReference(ref))) {
     return message('All reference positions must be complete');
   }
   const anchorLat = Number($('geoLat').value), anchorLon = Number($('geoLon').value);
@@ -346,6 +544,8 @@ $('applyMap').onclick = () => {
     return message('Y direction is ambiguous. Add a reference on another lane');
   }
   state.config.map_alignment.geo = solutions[0].geo;
+  state.config.map_alignment.fit_error_m = solutions[0].error;
+  state.config.map_alignment.calibrated_at = new Date().toISOString();
   $('mapResult').textContent = `Fit error ${solutions[0].error.toFixed(2)} m`;
   dirty();
   renderFields();
