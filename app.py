@@ -14,16 +14,27 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from engine import LidarEngine
+from sources import SOURCE_PARSERS
 
 ROOT = Path(__file__).resolve().parent
-DATA = ROOT / "data" / "lidars.json"
+DATA = Path(os.environ.get("KLA_CONFIG_DIR", str(ROOT / "data"))) / "lidars.json"
 LOCK = threading.RLock()
 ENGINES = {}
 CLIENTS = {}
 
 
 def default_lidar(lidar_id):
-    return {"id": lidar_id, "name": lidar_id, "enabled": True, "sensor_id": "", "mqtt": {"host": "192.168.1.181", "port": 1883, "topic": "Flasheye/ubuntu/tracking", "username": "", "password": "", "event_topic": f"Flasheye/ubuntu/lidar-events/{lidar_id}", "qos": 1}, "max_gap_sec": 5, "max_jump_m": 25, "regions": [], "rules": [], "roi": [], "map_alignment": {"control_points": [], "geo": None}}
+    event_prefix = os.environ.get("KLA_MQTT_EVENT_TOPIC_PREFIX", "Flasheye/ubuntu/lidar-events").rstrip("/")
+    return {"id": lidar_id, "name": lidar_id, "enabled": True, "source": "Flasheye",
+            "sensor_id": os.environ.get("KLA_DEFAULT_SENSOR_ID", ""),
+            "mqtt": {"host": os.environ.get("KLA_MQTT_HOST", "192.168.1.181"),
+                     "port": int(os.environ.get("KLA_MQTT_PORT", "1883")),
+                     "topic": os.environ.get("KLA_MQTT_TOPIC", "Flasheye/ubuntu/tracking"),
+                     "username": "", "password": "", "event_topic": f"{event_prefix}/{lidar_id}",
+                     "qos": int(os.environ.get("KLA_MQTT_QOS", "1"))},
+            "max_gap_sec": float(os.environ.get("KLA_DEFAULT_MAX_GAP_SEC", "5")),
+            "max_jump_m": float(os.environ.get("KLA_DEFAULT_MAX_JUMP_M", "25")),
+            "regions": [], "rules": [], "roi": [], "map_alignment": {"control_points": [], "geo": None}}
 
 
 def load():
@@ -33,9 +44,11 @@ def load():
 
 
 def save():
-    DATA.parent.mkdir(parents=True, exist_ok=True)
+    DATA.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = DATA.with_suffix(".tmp")
     temporary.write_text(json.dumps([engine.config for engine in ENGINES.values()], indent=2), encoding="utf-8")
+    if os.name == "posix":
+        temporary.chmod(0o600)
     temporary.replace(DATA)
 
 
@@ -45,6 +58,9 @@ def validate(config, existing=None):
         raise ValueError("LiDAR ID must contain letters, numbers, underscores or hyphens")
     if existing and existing != lidar_id:
         raise ValueError("LiDAR ID cannot be changed")
+    config.setdefault("source", "Flasheye")
+    if config["source"] not in SOURCE_PARSERS:
+        raise ValueError("Unsupported tracking source")
     mqtt = config.get("mqtt", {})
     if not mqtt.get("host") or not mqtt.get("topic"):
         raise ValueError("MQTT host and input topic are required")
@@ -302,8 +318,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--web-host", default="127.0.0.1")
-    parser.add_argument("--web-port", type=int, default=8091)
+    parser.add_argument("--web-host", default=os.environ.get("KLA_WEB_HOST", "127.0.0.1"))
+    parser.add_argument("--web-port", type=int, default=int(os.environ.get("KLA_WEB_PORT", "8091")))
     args = parser.parse_args()
     load()
     for lidar_id in list(ENGINES):

@@ -6,6 +6,8 @@ import time
 from collections import deque
 from uuid import uuid4
 
+from sources import parse_tracking
+
 
 def xy(value):
     return (float(value[0]), float(value[1]))
@@ -51,14 +53,6 @@ def heading(a, b, geo=None):
     else:
         east, north = dx, dy
     return (math.degrees(math.atan2(east, north)) + 360) % 360
-
-
-def payload_time(payload):
-    stamp = payload.get("header", {}).get("stamp", {})
-    try:
-        return float(stamp["secs"]) + float(stamp.get("nsecs", 0)) / 1e9
-    except (KeyError, TypeError, ValueError):
-        return time.time()
 
 
 class LidarEngine:
@@ -254,42 +248,26 @@ class LidarEngine:
         return emitted
 
     def process(self, payload):
-        timestamp = payload_time(payload)
-        frame = str(payload.get("header", {}).get("frame_id", "unknown"))
-        objects = payload.get("objects", [])
-        if not isinstance(objects, list):
+        tracking = parse_tracking(self.config.get("source", "Flasheye"), payload, self.config.get("sensor_id", ""))
+        if tracking is None:
             return []
+        timestamp = tracking["timestamp"]
+        frame = tracking["frame"]
         self.messages += 1
-        self.raw_in_last_message = len(objects)
-        self.valid_in_last_message = 0
+        self.raw_in_last_message = tracking["raw_count"]
+        self.valid_in_last_message = len(tracking["objects"])
         self.last_message = timestamp
         self.last_received = time.time()
         emitted = []
         max_gap = float(self.config.get("max_gap_sec", 5))
         max_jump = float(self.config.get("max_jump_m", 25))
-        for obj in objects:
-            try:
-                point = (float(obj["centroid"]["x"]), float(obj["centroid"]["y"]))
-                if not all(math.isfinite(v) for v in point):
-                    continue
-                oid = str(obj["id"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            center_data = obj.get("center_of_mass") or obj.get("centroid")
-            try:
-                center = (float(center_data["x"]), float(center_data["y"]))
-                if not all(math.isfinite(v) for v in center):
-                    center = point
-            except (KeyError, TypeError, ValueError):
-                center = point
-            sensor = str(obj.get("sensor_id", ""))
-            if self.config.get("sensor_id") and sensor != str(self.config["sensor_id"]):
-                continue
-            self.valid_in_last_message += 1
+        for obj in tracking["objects"]:
+            point, center = obj["point"], obj["center"]
+            oid, sensor = obj["id"], obj["sensor"]
             key = (frame, sensor, oid)
             track = self.tracks.get(key)
             if track is None or timestamp <= track["time"] or timestamp - track["time"] > max_gap or distance(point, track["pos"]) > max_jump * self.xy_scale():
-                self.tracks[key] = {"id": oid, "sensor": sensor, "frame": frame, "class": str(obj.get("predicted_class", "other")), "pos": point, "center_pos": center, "time": timestamp, "first_time": timestamp, "history": deque([point], maxlen=2000), "samples": deque([(timestamp, point)], maxlen=6), "speed": 0.0, "heading": None, "line_sides": {}, "zone_entries": {}, "sequences": {}, "last_events": {}}
+                self.tracks[key] = {"id": oid, "sensor": sensor, "frame": frame, "class": obj["class"], "pos": point, "center_pos": center, "time": timestamp, "first_time": timestamp, "history": deque([point], maxlen=2000), "samples": deque([(timestamp, point)], maxlen=6), "speed": 0.0, "heading": None, "line_sides": {}, "zone_entries": {}, "sequences": {}, "last_events": {}}
                 continue
             old = track["pos"]
             old_center = track["center_pos"]
@@ -301,7 +279,7 @@ class LidarEngine:
             if displacement >= 0.1 * self.xy_scale():
                 geo = self.config.get("map_alignment", {}).get("geo")
                 track["heading"] = heading(start_point, point, geo)
-            track["class"] = str(obj.get("predicted_class", "other"))
+            track["class"] = obj["class"]
             track["pos"] = point
             track["center_pos"] = center
             track["time"] = timestamp

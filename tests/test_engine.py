@@ -5,12 +5,12 @@ from pathlib import Path
 from engine import LidarEngine, heading
 
 
-def frame(seq, x, y, sensor="s1", oid=1):
-    return {"header": {"frame_id": "f", "stamp": {"secs": seq, "nsecs": 0}}, "objects": [{"id": oid, "sensor_id": sensor, "predicted_class": "car", "centroid": {"x": x, "y": y}}]}
+def frame(seq, x, y, sensor="s1", oid=1, frame_id="f"):
+    return {"header": {"frame_id": frame_id, "stamp": {"secs": seq, "nsecs": 0}}, "objects": [{"id": oid, "sensor_id": sensor, "predicted_class": "car", "centroid": {"x": x, "y": y}}]}
 
 
 def config(lidar_id):
-    return {"id": lidar_id, "sensor_id": "s1", "max_gap_sec": 5, "max_jump_m": 25,
+    return {"id": lidar_id, "source": "Flasheye", "sensor_id": "f", "max_gap_sec": 5, "max_jump_m": 25,
             "regions": [
                 {"id": "entry", "name": "Entry", "type": "line", "points": [[0, -5], [0, 5]], "forward_hint": [2, 0], "crossing_sensitivity_m": .35},
                 {"id": "exit", "name": "Exit", "type": "line", "points": [[10, -5], [10, 5]], "forward_hint": [12, 0], "crossing_sensitivity_m": .35},
@@ -33,12 +33,37 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(line["lidar_id"], "lidar-a")
         self.assertTrue(line["sequence_complete"])
 
-    def test_exit_first_and_sensor_filter(self):
+    def test_exit_first_and_frame_filter(self):
         engine = LidarEngine(config("lidar-a"))
         engine.process(frame(1, 8, 0))
         self.assertFalse(any(e["event_type"] == "line_crossing" for e in engine.process(frame(2, 12, 0))))
-        self.assertEqual(engine.process(frame(3, -2, 0, sensor="other")), [])
+        self.assertEqual(engine.process(frame(3, -2, 0, frame_id="other")), [])
         self.assertEqual(len(engine.tracks), 1)
+        self.assertEqual(engine.messages, 2)
+
+    def test_shared_topic_routes_by_flasheye_frame_id(self):
+        first_settings = config("first")
+        second_settings = config("second")
+        first_settings["sensor_id"] = "lidar-one"
+        second_settings["sensor_id"] = "lidar-two"
+        first, second = LidarEngine(first_settings), LidarEngine(second_settings)
+        for payload in (frame(1, -2, 0, frame_id="lidar-one"),
+                        frame(2, 2, 0, frame_id="lidar-one"),
+                        frame(3, -2, 0, frame_id="lidar-two")):
+            first.process(payload)
+            second.process(payload)
+        self.assertEqual(first.messages, 2)
+        self.assertEqual(second.messages, 1)
+        self.assertEqual(len(first.tracks), 1)
+        self.assertEqual(len(second.tracks), 1)
+        self.assertEqual(next(iter(first.tracks.values()))["frame"], "lidar-one")
+        self.assertEqual(next(iter(second.tracks.values()))["frame"], "lidar-two")
+
+    def test_non_flasheye_shape_is_ignored(self):
+        engine = LidarEngine(config("a"))
+        self.assertEqual(engine.process({"objects": [frame(1, 0, 0)["objects"][0]]}), [])
+        self.assertEqual(engine.messages, 0)
+        self.assertEqual(engine.tracks, {})
 
     def test_independent_lidars(self):
         a, b = LidarEngine(config("a")), LidarEngine(config("b"))

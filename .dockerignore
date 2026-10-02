@@ -1,0 +1,10 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+data
+tests
+*.png
+*.log
+.env*

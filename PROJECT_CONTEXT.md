@@ -7,6 +7,7 @@
 ## Components
 
 - `app.py`: HTTP API, configuration validation and persistence, and MQTT connection management.
+- `sources.py`: source-specific payload parsing and normalization; currently supports Flasheye only.
 - `engine.py`: per-LiDAR track state, line crossing, zone transition, occupancy, and recent in-memory events.
 - `static/app.js`: base UI state, scene canvas, configuration controls, and polling.
 - `static/mapview.js`: Leaflet map projection, live ID labels, stationary reference capture, and calibration fitting.
@@ -23,6 +24,10 @@ The old track-envelope Auto Calibration proposal and its ROI/line generation API
 
 Run `python app.py --web-port 8091`, then open `http://127.0.0.1:8091`. Install `requirements.txt` first. The app must have network access to its MQTT broker; a sandboxed process may serve the UI while failing to connect to MQTT. Check each agent's MQTT status and message count in the UI or `/api/lidars`.
 
+Ubuntu Docker deployment uses `Dockerfile` and `compose.yaml`. Compose loads `/usr/src/env/.env.kla.qa` and mounts `/usr/src/lidar-config` to the same path in the container. `KLA_CONFIG_DIR` selects the directory containing `lidars.json`; the local default remains `data/`. Environment settings configure server binding and defaults for new agents, while persisted per-agent values come from the JSON file. See `env.kla.qa.example` and the README for setup and migration.
+
 Local configuration, including UI-saved MQTT credentials, is in ignored `data/lidars.json`; never commit it. Events and active tracks are in memory and reset on restart. Rules require assigned geometry; neither calibration references nor ROI trigger events by themselves.
+
+Each LiDAR config has a `source` field; older configs without it default to `Flasheye`. For that source, the LiDAR's `sensor_id` filter matches `header.frame_id` before any tracks or events are updated. The object-level `sensor_id` remains part of the track identity and event output but is not the routing filter. Additional sources should add a parser to `SOURCE_PARSERS` that returns the normalized tracking shape, then expose that source in the UI. Review saved sensor filters after upgrading from the prior object-level behavior.
 
 Run `python -m unittest discover -s tests -v` and `node --check static/mapview.js` after changes.

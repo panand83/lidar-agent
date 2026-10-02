@@ -1,6 +1,7 @@
 # Local LiDAR settings may contain MQTT credentials.
 data/lidars.json
 data/*.tmp
+.env.kla.qa
 
 # Local development and browser-test artifacts.
 __pycache__/
