@@ -49,5 +49,22 @@ def parse_flasheye(payload, sensor_filter):
 SOURCE_PARSERS = {"Flasheye": parse_flasheye}
 
 
+def _flasheye_accepts(payload, sensor_filter):
+    if not isinstance(payload, dict):
+        return False
+    header = payload.get("header")
+    if not isinstance(header, dict) or header.get("frame_id") is None:
+        return False
+    return not sensor_filter or str(header["frame_id"]) == str(sensor_filter)
+
+
+SOURCE_INTAKE_FILTERS = {"Flasheye": _flasheye_accepts}
+
+
+def accepts_tracking(source, payload, sensor_filter=""):
+    matcher = SOURCE_INTAKE_FILTERS.get(source)
+    return matcher(payload, sensor_filter) if matcher else True
+
+
 def parse_tracking(source, payload, sensor_filter=""):
     return SOURCE_PARSERS[source](payload, sensor_filter)

@@ -30,11 +30,13 @@ function renderDrawActions() {
 
 function editorIcon(name) {
   const paths = {
-    edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L9 17l-4 1 1-4Z"/>',
-    delete: '<path d="M3 6h18M8 6V4h8v2m3 0-1 14H6L5 6m5 4v6m4-6v6"/>',
+    edit: '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
+    delete: '<path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
     on: '<rect x="2" y="7" width="20" height="10" rx="5"/><circle cx="16" cy="12" r="3"/>',
     off: '<rect x="2" y="7" width="20" height="10" rx="5"/><circle cx="8" cy="12" r="3"/>',
-    bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>'
+    route: '<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>',
+    zone: '<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/>',
+    layers: '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/>'
   };
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name]}</svg>`;
 }
@@ -49,8 +51,109 @@ function iconButton(icon, title, action, dangerous = false) {
   return button;
 }
 
+const editorModalFocus = {};
+function createEditorModal(kind, title, contentId) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modalBackdrop';
+  backdrop.hidden = true;
+  const box = document.createElement('div');
+  box.className = 'modalBox editorModalBox';
+  box.setAttribute('role', 'dialog');
+  box.setAttribute('aria-modal', 'true');
+  const heading = document.createElement('h2');
+  heading.id = `${kind}EditorTitle`;
+  heading.textContent = title;
+  box.setAttribute('aria-labelledby', heading.id);
+  const actions = document.createElement('div');
+  actions.className = 'editorModalActions';
+  const close = document.createElement('button');
+  close.textContent = 'Close';
+  close.onclick = () => closeEditorModal(kind);
+  const saveButton = document.createElement('button');
+  saveButton.className = 'primary';
+  saveButton.textContent = 'Save';
+  saveButton.onclick = async () => {
+    saveButton.disabled = true;
+    try { if (await save()) closeEditorModal(kind); }
+    finally { saveButton.disabled = false; }
+  };
+  actions.append(close, saveButton);
+  box.append(heading, $(contentId), actions);
+  backdrop.append(box);
+  backdrop.onclick = event => { if (event.target === backdrop) closeEditorModal(kind); };
+  backdrop.onkeydown = event => {
+    if (event.key !== 'Tab') return;
+    const focusable = [...box.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled])')]
+      .filter(element => !element.hidden && element.getClientRects().length);
+    if (!focusable.length) return;
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  };
+  document.body.append(backdrop);
+  return backdrop;
+}
+const geometryEditModal = createEditorModal('geometry', 'Edit Geometry', 'geometryEdit');
+const ruleEditModal = createEditorModal('rule', 'Edit Rule', 'ruleEdit');
+ruleEditModal.querySelector('.editorModalBox').classList.add('ruleEditorModalBox');
+$('ruleEdit').classList.add('ruleFormGrid');
+$('ruleClassChoices').closest('label').classList.add('ruleFullWidth');
+
+function openEditorModal(kind, id) {
+  editorModalFocus[kind] = document.activeElement;
+  if (kind === 'geometry') {
+    state.selectedRegion = id;
+    state.geometryEditorOpen = true;
+  } else {
+    state.selectedRule = id;
+    state.ruleEditorOpen = true;
+  }
+  renderFields();
+  $(kind === 'geometry' ? 'geometryName' : 'ruleName').focus();
+}
+
+function closeEditorModal(kind) {
+  if (kind === 'geometry') state.geometryEditorOpen = false;
+  else state.ruleEditorOpen = false;
+  renderFields();
+  const target = editorModalFocus[kind];
+  (target?.isConnected ? target : $(kind === 'geometry' ? 'newGeometry' : 'addRule')).focus();
+}
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  if (!geometryEditModal.hidden) closeEditorModal('geometry');
+  else if (!ruleEditModal.hidden) closeEditorModal('rule');
+});
+
 function regionAssigned(id) {
   return state.config.rules.some(rule => rule.enabled && (rule.region_id === id || rule.line_region_ids?.includes(id)));
+}
+
+function geometryAppearance(region) {
+  if (region.type === 'polygon') return 'polygon';
+  return /\b(exit|outgoing|outbound|leaving|departure)\b/i.test(region.name) ? 'exit' : 'entry';
+}
+
+function geometryPictogram(kind) {
+  if (kind === 'polygon') {
+    return '<svg viewBox="0 0 48 48" aria-hidden="true"><path class="shapeFill" d="M11 14 32 8 40 35 8 36Z"/><path d="M11 14 32 8 40 35 8 36Z"/><circle cx="11" cy="14" r="2.8"/><circle cx="32" cy="8" r="2.8"/><circle cx="40" cy="35" r="2.8"/><circle cx="8" cy="36" r="2.8"/></svg>';
+  }
+  return '<svg viewBox="0 0 48 48" aria-hidden="true"><path class="crossingMarks" d="M4 42h7m7 0h7m7 0h7"/><circle class="walker" cx="25" cy="8" r="3"/><path class="walker" d="m23 14-6 3-3 10m9-13 5 5 6 2m-11-6-3 12-7 9m7-9 8 7"/></svg>';
+}
+
+function geometryIcon(region, count = 1) {
+  const kind = region ? geometryAppearance(region) : 'unassigned';
+  const icon = document.createElement('span');
+  icon.className = `geometryTypeIcon ${kind}`;
+  icon.setAttribute('aria-hidden', 'true');
+  icon.innerHTML = region ? geometryPictogram(kind) : editorIcon('layers');
+  if (count > 1) {
+    const badge = document.createElement('span');
+    badge.className = 'geometryIconCount';
+    badge.textContent = count;
+    icon.append(badge);
+  }
+  return icon;
 }
 
 renderGeometryList = function () {
@@ -59,9 +162,9 @@ renderGeometryList = function () {
   root.replaceChildren();
   for (const region of state.config.regions) {
     const row = document.createElement('div');
-    row.className = 'kyraRow' + (state.selectedRegion === region.id ? ' active' : '');
-    const name = document.createElement('span');
-    name.className = 'rowName';
+    row.className = 'kyraRow geometryRow' + (state.selectedRegion === region.id ? ' active' : '');
+    const name = document.createElement('button');
+    name.className = 'geometryName';
     name.textContent = region.name;
     name.onclick = () => {
       state.selectedRegion = state.selectedRegion === region.id ? null : region.id;
@@ -70,21 +173,22 @@ renderGeometryList = function () {
       renderFields();
     };
     const chip = document.createElement('span');
-    chip.className = 'typeChip';
-    chip.textContent = region.type;
-    row.append(name, chip,
+    chip.className = `geometryTypeChip ${geometryAppearance(region)}`;
+    chip.innerHTML = region.type === 'line'
+      ? '<span class="lineMark" aria-hidden="true"></span><span>Line</span>'
+      : '<span class="polygonMark" aria-hidden="true"></span><span>Polygon</span>';
+    row.append(geometryIcon(region), name, chip,
       iconButton('edit', 'Edit geometry', () => {
-        state.selectedRegion = region.id;
-        state.geometryEditorOpen = true;
         mode('selectTool');
-        renderFields();
-        $('geometryName').focus();
+        openEditorModal('geometry', region.id);
       }),
       iconButton('delete', 'Delete geometry', () => removeGeometry(region.id), true));
     root.append(row);
   }
   const region = selectedRegion();
-  $('geometryEdit').hidden = !region || !state.geometryEditorOpen;
+  const editorOpen = !!region && state.geometryEditorOpen;
+  geometryEditModal.hidden = !editorOpen;
+  $('geometryEdit').hidden = !editorOpen;
   if (!region) return;
   $('geometryName').value = region.name;
   let redraw = $('redrawGeometry');
@@ -157,15 +261,14 @@ function ruleLineChoices(select, lines, selectedId) {
 function renderDirectionChoices(rule) {
   const select = $('ruleDirection');
   const choices = rule.type === 'zone_transition' ? [['any', 'Any (Enter or Leave)'], ['entering', 'Enter'],
-    ['leaving', 'Leave'], ['both', 'Both (Enter then Leave)']] :
-    rule.type === 'line_crossing' ? [['any', 'Any'], ['forward', 'Forward'], ['backward', 'Backward']] : [['any', 'Any']];
+    ['leaving', 'Leave'], ['both', 'Both (Enter then Leave)']] : [['any', 'Any']];
   select.replaceChildren(...choices.map(([value, label]) => {
     const option = document.createElement('option');
     option.value = value;
     option.textContent = label;
     return option;
   }));
-  const current = rule.direction_mode || 'any';
+  const current = rule.type === 'zone_transition' ? rule.direction_mode || 'any' : 'any';
   if (!choices.some(([value]) => value === current)) {
     const unsupported = document.createElement('option');
     unsupported.value = current;
@@ -202,19 +305,23 @@ renderRuleList = function () {
   if (!state.config) return;
   const root = $('ruleList');
   root.replaceChildren();
-  const recent = new Set((state.snapshot?.events || [])
-    .filter(event => Date.now() / 1000 - event.timestamp < 3)
-    .map(event => event.rule_id));
   for (const rule of state.config.rules) {
     const row = document.createElement('div');
-    row.className = 'kyraRow' + (state.selectedRule === rule.id ? ' active' : '');
-    const toggle = iconButton(rule.enabled ? 'on' : 'off', rule.enabled ? 'Disable rule' : 'Enable rule', () => {
-      rule.enabled = !rule.enabled;
+    row.className = 'kyraRow ruleRow' + (state.selectedRule === rule.id ? ' active' : '');
+    const regionIds = rule.type === 'line_crossing'
+      ? (rule.line_region_ids?.length ? rule.line_region_ids : [rule.region_id]).filter(Boolean)
+      : [rule.region_id].filter(Boolean);
+    const linkedRegion = state.config.regions.find(region => region.id === regionIds[0]);
+    const typeIcon = geometryIcon(linkedRegion, regionIds.length);
+    const toggle = switchControl(rule.enabled !== false, `${rule.enabled !== false ? 'Disable' : 'Enable'} ${rule.name}`, enabled => {
+      rule.enabled = enabled;
       dirty();
       renderFields();
     });
-    const name = document.createElement('span');
-    name.className = 'rowName';
+    const identity = document.createElement('div');
+    identity.className = 'ruleIdentity';
+    const name = document.createElement('button');
+    name.className = 'ruleName';
     name.textContent = rule.name;
     name.onclick = () => {
       state.selectedRule = state.selectedRule === rule.id ? null : rule.id;
@@ -223,31 +330,35 @@ renderRuleList = function () {
     };
     const chip = document.createElement('span');
     chip.className = 'typeChip';
-    chip.textContent = rule.type;
-    const alert = iconButton('bell', 'Rule alert state', () => {});
-    if (recent.has(rule.id)) alert.classList.add('alertOn');
-    row.append(toggle, name, chip,
-      iconButton('edit', 'Edit rule', () => {
-        state.selectedRule = rule.id;
-        state.ruleEditorOpen = true;
-        renderFields();
-        $('ruleName').focus();
-      }),
-      iconButton('delete', 'Delete rule', () => removeRule(rule.id), true), alert);
+    chip.textContent = rule.type.replace('_', ' ');
+    identity.append(name, chip);
+    const dividerBefore = document.createElement('span');
+    dividerBefore.className = 'ruleDivider';
+    dividerBefore.setAttribute('aria-hidden', 'true');
+    const edit = iconButton('edit', 'Edit rule', () => {
+        openEditorModal('rule', rule.id);
+      });
+    const remove = iconButton('delete', 'Delete rule', () => removeRule(rule.id), true);
+    row.dataset.ruleId = rule.id;
+    row.append(typeIcon, identity, dividerBefore, toggle, edit, remove);
     root.append(row);
   }
+  updateRuleAlerts();
   const rule = selectedRule();
-  $('ruleEdit').hidden = !rule || !state.ruleEditorOpen;
+  const editorOpen = !!rule && state.ruleEditorOpen;
+  ruleEditModal.hidden = !editorOpen;
+  $('ruleEdit').hidden = !editorOpen;
   if (!rule) return;
   $('ruleName').value = rule.name;
   $('ruleType').value = rule.type;
   $('ruleEnabled').checked = rule.enabled !== false;
+  $('ruleEnabled').closest('.toggleControl').querySelector('.toggleText').textContent = rule.enabled !== false ? 'Enabled' : 'Disabled';
   $('ruleClasses').value = (rule.class_filter || []).join(',');
   renderClassChoices(rule);
   $('ruleRegionLabel').hidden = rule.type === 'line_crossing';
   $('sequenceFields').hidden = rule.type !== 'line_crossing';
   $('occupancyLabel').hidden = rule.type !== 'occupancy';
-  $('ruleDirection').closest('label').hidden = rule.type === 'occupancy';
+  $('ruleDirection').closest('label').hidden = rule.type !== 'zone_transition';
   const polygons = state.config.regions.filter(region => region.type === 'polygon');
   ruleLineChoices($('ruleRegion'), polygons, rule.region_id);
   const lines = state.config.regions.filter(region => region.type === 'line');
@@ -264,10 +375,13 @@ renderRuleList = function () {
   $('headingCenter').value = rule.heading_center_deg ?? 0;
   $('headingDeviation').value = rule.heading_deviation_deg ?? 45;
   const trackFiltersVisible = rule.type !== 'occupancy';
-  for (const id of ['headingEnabled', 'headingCenter', 'headingDeviation', 'minSpeed', 'minAge', 'debounce']) {
+  for (const id of ['headingEnabled', 'minSpeed', 'minAge', 'debounce']) {
     $(id).closest('label').hidden = !trackFiltersVisible;
   }
-  $('headingTool').parentElement.hidden = !trackFiltersVisible;
+  for (const id of ['headingCenter', 'headingDeviation']) {
+    $(id).closest('label').hidden = !trackFiltersVisible || !rule.heading_enabled;
+  }
+  $('headingTool').parentElement.hidden = !trackFiltersVisible || !rule.heading_enabled;
   $('headingTool').disabled = !trackFiltersVisible || !rule.heading_enabled;
   $('headingTool').classList.toggle('active', state.mode === 'heading' && trackFiltersVisible);
   const assigned = rule.type === 'line_crossing' ? ids.length > 0 : !!rule.region_id;
@@ -300,18 +414,18 @@ $('addRule').onclick = () => {
     Object.assign(rule, {line_region_ids: first ? [first.id] : [], line_trigger_mode: 'any'});
   }
   if (type !== 'occupancy') {
-    Object.assign(rule, {direction_mode: 'any', heading_enabled: false, heading_center_deg: 0,
+    Object.assign(rule, {heading_enabled: false, heading_center_deg: 0,
       heading_deviation_deg: 45, min_speed_mps: 0,
       min_track_age_ms: type === 'line_crossing' ? 0 : 300,
       debounce_ms: type === 'line_crossing' ? 1500 : 2000});
+    if (type === 'zone_transition') rule.direction_mode = 'any';
   } else {
     rule.publish_interval_ms = 500;
   }
   state.config.rules.push(rule);
   state.selectedRule = rule.id;
-  state.ruleEditorOpen = true;
   dirty();
-  renderFields();
+  openEditorModal('rule', rule.id);
 };
 
 function updateLineIds() {
@@ -335,7 +449,8 @@ $('ruleType').addEventListener('change', () => {
   if (rule.type !== 'line_crossing') for (const key of lineOnly) delete rule[key];
   if (rule.type !== 'occupancy') {
     delete rule.publish_interval_ms;
-    rule.direction_mode ??= 'any';
+    if (rule.type === 'zone_transition') rule.direction_mode ??= 'any';
+    else delete rule.direction_mode;
     rule.heading_enabled ??= false;
     rule.heading_center_deg ??= 0;
     rule.heading_deviation_deg ??= 45;
@@ -346,9 +461,8 @@ $('ruleType').addEventListener('change', () => {
     for (const key of trackOnly) delete rule[key];
     rule.publish_interval_ms ??= 500;
   }
-  const allowed = rule.type === 'zone_transition' ? ['any', 'entering', 'leaving', 'both'] :
-    rule.type === 'line_crossing' ? ['any', 'forward', 'backward'] : ['any'];
-  if (rule.type !== 'occupancy' && !allowed.includes(rule.direction_mode)) rule.direction_mode = 'any';
+  const allowed = ['any', 'entering', 'leaving', 'both'];
+  if (rule.type === 'zone_transition' && !allowed.includes(rule.direction_mode)) rule.direction_mode = 'any';
   dirty();
   renderFields();
 });
@@ -366,8 +480,11 @@ for (const [id, key] of [['headingEnabled', 'heading_enabled'], ['headingCenter'
 $('headingTool').textContent = 'Adjust Heading';
 $('headingTool').onclick = () => {
   if (!selectedRule()?.heading_enabled || selectedRule()?.type === 'occupancy') return;
-  mode(state.mode === 'heading' ? 'selectTool' : 'heading');
+  const headingMode = state.mode !== 'heading';
+  state.ruleEditorOpen = false;
+  mode(headingMode ? 'heading' : 'selectTool');
   renderFields();
+  if (headingMode) message('Adjust heading on the map, then save the rule');
 };
 function headingAnchor(rule) {
   if (Array.isArray(rule.heading_anchor) && rule.heading_anchor.length === 2 &&
@@ -471,7 +588,12 @@ canvas.addEventListener('wheel', event => {
   dirty();
 }, {capture: true, passive: false});
 
-$('newGeometry').onclick = () => { if (state.config) { state.redrawingRegion = null; $('geometryModal').hidden = false; } };
+$('newGeometry').onclick = () => {
+  if (!state.config) return message('Select a LiDAR agent first');
+  state.redrawingRegion = null;
+  mode('selectTool');
+  $('geometryModal').hidden = false;
+};
 $('cancelGeometry').onclick = () => $('geometryModal').hidden = true;
 for (const [id, tool] of [['chooseLine', 'drawLine'], ['choosePolygon', 'drawPolygon']]) {
   $(id).onclick = () => {
@@ -525,9 +647,6 @@ finishDraft = function () {
   } else if (!region && state.mode === 'drawPolygon' && points.length >= 3) {
     region = {id: uid('zone'), name: `Zone ${state.config.regions.filter(item => item.type === 'polygon').length + 1}`,
       type: 'polygon', points};
-  } else if (!region && state.mode === 'drawRoi' && points.length >= 3) {
-    state.config.roi = points;
-    dirty();
   }
   if (region && !validReplacement) {
     state.config.regions.push(region);
@@ -535,12 +654,15 @@ finishDraft = function () {
   }
   if (region) {
     state.selectedRegion = region.id;
-    state.geometryEditorOpen = true;
+    state.geometryEditorOpen = false;
   }
   state.draft = [];
   state.redrawingRegion = null;
   mode('selectTool');
-  if (region) setTab('scene');
+  if (region) {
+    setTab('scene');
+    openEditorModal('geometry', region.id);
+  }
   else renderFields();
 };
 
@@ -549,7 +671,6 @@ setTab = function (tab) {
   if (tab === 'scene') {
     $('scenePanel').hidden = true;
     $('geometryPanel').hidden = false;
-    if (state.config && state.mode === 'pan') mode('selectTool');
   }
 };
 
@@ -630,13 +751,12 @@ canvas.addEventListener('click', event => {
     for (let index = 0; index < length; index++) {
       if (pointSegmentDistance(location, points[index], points[(index + 1) % points.length]) < 12 * (devicePixelRatio || 1)) {
         state.selectedRegion = region.id;
-        state.geometryEditorOpen = true;
         const rule = selectedRule();
         if (rule && region.type === 'polygon' && rule.type !== 'line_crossing') {
           rule.region_id = region.id;
           dirty();
         }
-        renderFields();
+        openEditorModal('geometry', region.id);
         return;
       }
     }

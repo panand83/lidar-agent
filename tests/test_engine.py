@@ -84,6 +84,19 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(a.tracks), 1)
         self.assertTrue(b.events)
 
+    def test_reset_tracks_preserves_events_and_other_lidars(self):
+        a, b = LidarEngine(config("a")), LidarEngine(config("b"))
+        for engine in (a, b):
+            engine.process(frame(1, -2, 0))
+            engine.process(frame(2, 2, 0))
+        a.occupancy["test"] = {"count": 1}
+        events = list(a.events)
+        a.reset_tracks()
+        self.assertEqual(a.snapshot()["tracks"], [])
+        self.assertEqual(a.occupancy, {})
+        self.assertEqual(list(a.events), events)
+        self.assertEqual(len(b.tracks), 1)
+
     def test_real_flasheye_payload_shape(self):
         sample_path = Path(__file__).resolve().parents[2] / "lidar-zone-starter" / "sample_tracking.json"
         sample = json.loads(sample_path.read_text(encoding="utf-8"))
@@ -141,6 +154,16 @@ class EngineTests(unittest.TestCase):
         engine.process(frame(1, 2, 0))
         self.assertEqual(engine.process(frame(2, -2, 0)), [])
         events = engine.process(frame(3, 2, 0))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["direction"], "forward")
+
+    def test_legacy_rule_direction_does_not_suppress_line_crossing(self):
+        settings = config("legacy-direction")
+        settings["rules"] = [{"id": "line", "name": "Line", "type": "line_crossing", "enabled": True,
+                              "line_region_ids": ["entry"], "direction_mode": "backward", "class_filter": ["car"]}]
+        engine = LidarEngine(settings)
+        engine.process(frame(1, -2, 0))
+        events = engine.process(frame(2, 2, 0))
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["direction"], "forward")
 

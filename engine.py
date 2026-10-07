@@ -77,6 +77,10 @@ class LidarEngine:
     def reset_events(self):
         self.events.clear()
 
+    def reset_tracks(self):
+        self.tracks.clear()
+        self.occupancy.clear()
+
     def xy_scale(self):
         geo = self.config.get("map_alignment", {}).get("geo")
         return float(geo["scale"]) if geo else 1.0
@@ -172,7 +176,7 @@ class LidarEngine:
                     if key not in line_hits and rid in regions and regions[rid]["type"] == "line":
                         line_hits[key] = self._line_hits(regions[rid], track, old_point, new_point, use_center)
                 hits = {rid: line_hits.get((rid, use_center)) for rid in ids}
-                hits = {rid: hit for rid, hit in hits.items() if hit and self._direction_ok(rule.get("direction_mode"), hit[0])}
+                hits = {rid: hit for rid, hit in hits.items() if hit}
                 if (timestamp - track["last_events"].get(rule["id"], -math.inf)) * 1000 < float(rule.get("debounce_ms", 1500)):
                     continue
                 if not hits:
@@ -291,5 +295,11 @@ class LidarEngine:
         emitted.extend(self._count_occupancy(timestamp))
         return emitted
 
+    def status(self):
+        return {"messages": self.messages, "raw_in_last_message": self.raw_in_last_message,
+                "valid_in_last_message": self.valid_in_last_message, "last_message": self.last_message,
+                "last_received": self.last_received, "mqtt_status": self.mqtt_status,
+                "error": self.error, "tracks": len(self.tracks)}
+
     def snapshot(self):
-        return {"config": self.config, "status": {"messages": self.messages, "raw_in_last_message": self.raw_in_last_message, "valid_in_last_message": self.valid_in_last_message, "last_message": self.last_message, "last_received": self.last_received, "mqtt_status": self.mqtt_status, "error": self.error, "tracks": len(self.tracks)}, "tracks": [{"id": t["id"], "sensor": t["sensor"], "class": t["class"], "x": t["pos"][0], "y": t["pos"][1], "time": t["time"], "points": list(t["history"])} for t in self.tracks.values()], "events": list(self.events)}
+        return {"config": self.config, "status": self.status(), "tracks": [{"id": t["id"], "sensor": t["sensor"], "class": t["class"], "x": t["pos"][0], "y": t["pos"][1], "time": t["time"], "points": list(t["history"])} for t in self.tracks.values()], "events": list(self.events)}

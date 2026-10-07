@@ -1,5 +1,8 @@
 # Local LiDAR settings may contain MQTT credentials.
 data/lidars.json
+data/lidars/
+data/lidars.json.migrated*
+data/integrations-cache.json
 data/*.tmp
 .env.kla.qa
 

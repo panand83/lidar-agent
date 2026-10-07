@@ -46,7 +46,6 @@ function unprojectMap(latitude, longitude) {
 function initMap() {
   if (backgroundMap || typeof L === 'undefined') return;
   backgroundMap = L.map('mapBackground', {zoomControl: false, maxZoom: 22}).setView([0, 0], 2);
-  L.control.zoom({position: 'bottomright'}).addTo(backgroundMap);
   const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
     maxNativeZoom: 19, maxZoom: 22, attribution: 'Tiles &copy; Esri and imagery contributors'
   });
@@ -141,7 +140,6 @@ function paintOverlay() {
       return zone?.type === 'polygon' && track.class && insideMapPolygon([track.x, track.y], zone.points);
     })
   ).map(rule => rule.region_id));
-  if (state.config.roi?.length) line([...state.config.roi, state.config.roi[0]], '#fff000', 2);
   for (const region of state.config.regions) {
     const active = highlighted.has(region.id);
     const accent = active ? '#ffdc00' : occupied.has(region.id) ? '#3ce13c' : assigned.has(region.id) ? '#2b8fff' : '#a1a1aa';
@@ -192,7 +190,7 @@ function paintOverlay() {
       }
     }
   }
-  for (const track of state.snapshot?.tracks || []) {
+  for (const track of visibleTracks()) {
     line(track.points, '#ffd54f', 2);
     if (state.snapshot.status?.last_message - track.time > 2) continue;
     const point = screen([track.x, track.y]);
@@ -374,8 +372,14 @@ function insideMapPolygon(point, polygon) {
 renderCanvas = function () {
   if (!currentGeo() || (backgroundMap && !$('mapBackground').hidden)) paintOverlay();
   else {
-    xyRender();
-    for (const track of liveTracks()) drawTrackId(track, screen([track.x, track.y]));
+    const tracks = state.snapshot?.tracks;
+    if (tracks) state.snapshot.tracks = visibleTracks();
+    try {
+      xyRender();
+      for (const track of liveTracks()) drawTrackId(track, screen([track.x, track.y]));
+    } finally {
+      if (tracks) state.snapshot.tracks = tracks;
+    }
   }
 };
 
@@ -388,7 +392,7 @@ poll = async function () {
 
 fit = function () {
   if (!currentGeo() || !backgroundMap) return xyFit();
-  const points = [...(state.snapshot?.tracks || []).flatMap(track => track.points),
+  const points = [...visibleTracks().flatMap(track => track.points),
     ...(state.config?.regions || []).flatMap(region => region.points)];
   if (points.length) backgroundMap.fitBounds(L.latLngBounds(points.map(projectXY)).pad(.2), {maxZoom: 19});
   else backgroundMap.setView([currentGeo().lat, currentGeo().lon], 19);
@@ -410,10 +414,8 @@ function zoomMap(direction, pixel) {
     anchor[1] + (maxY - anchor[1]) * factor];
   renderCanvas();
 }
-$('zoomIn').onclick = () => zoomMap(1);
-$('zoomOut').onclick = () => zoomMap(-1);
 canvas.addEventListener('wheel', event => {
-  if (state.mode === 'pan') return;
+  if (state.mode === 'pan' && currentGeo()) return;
   event.preventDefault();
   zoomMap(event.deltaY < 0 ? 1 : -1, pointer(event));
 }, {passive: false});
@@ -497,6 +499,20 @@ $('addControlRow').onclick = () => {
   renderCalibrationGuide();
 };
 
+function referencePairIssue(refs, eastFactor, northFactor) {
+  for (let first = 0; first < refs.length; first++) {
+    for (let second = first + 1; second < refs.length; second++) {
+      const xyDistance = Math.hypot(refs[first].x - refs[second].x, refs[first].y - refs[second].y);
+      const mapDistance = Math.hypot((refs[first].lon - refs[second].lon) * eastFactor,
+        (refs[first].lat - refs[second].lat) * northFactor);
+      if (xyDistance > 5 && mapDistance < 2) {
+        return `References ${first + 1} and ${second + 1} are ${xyDistance.toFixed(1)} m apart in LiDAR data but only ${mapDistance.toFixed(1)} m apart on the map. Re-pick a map location.`;
+      }
+    }
+  }
+  return null;
+}
+
 $('applyMap').onclick = () => {
   if (!state.config) return;
   const refs = state.config.map_alignment.control_points;
@@ -510,6 +526,11 @@ $('applyMap').onclick = () => {
   }
   const eastFactor = 111320 * Math.cos(anchorLat * Math.PI / 180);
   const northFactor = 111132;
+  const pairIssue = referencePairIssue(refs, eastFactor, northFactor);
+  if (pairIssue) {
+    $('mapResult').textContent = pairIssue;
+    return message(pairIssue);
+  }
   const solutions = [1, -1].map(sign => {
     const points = refs.map(ref => ({x: ref.x, y: sign * ref.y,
       east: (ref.lon - anchorLon) * eastFactor, north: (ref.lat - anchorLat) * northFactor}));
@@ -541,7 +562,9 @@ $('applyMap').onclick = () => {
   }).filter(Boolean).sort((a, b) => a.error - b.error);
   if (!solutions.length) return message('Reference positions cannot determine an alignment');
   if (solutions.length > 1 && solutions[1].error - solutions[0].error < Math.max(.5, solutions[0].error * .2)) {
-    return message('Y direction is ambiguous. Add a reference on another lane');
+    const issue = `Y direction is ambiguous: both orientations fit similarly (${solutions[0].error.toFixed(2)} m and ${solutions[1].error.toFixed(2)} m error). Verify map reference locations or add a well-separated stop.`;
+    $('mapResult').textContent = issue;
+    return message(issue);
   }
   state.config.map_alignment.geo = solutions[0].geo;
   state.config.map_alignment.fit_error_m = solutions[0].error;

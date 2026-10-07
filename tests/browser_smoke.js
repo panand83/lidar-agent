@@ -47,6 +47,10 @@ async function main() {
   assert.equal(initial.scene, true);
   assert.equal(initial.geometry, false);
   assert.equal(initial.override, true);
+  const initialMap = await evaluate('({mode:state.mode,panActive:document.getElementById("pan").classList.contains("active"),zoomButtons:!!document.getElementById("zoomIn")||!!document.getElementById("zoomOut"),leafletZoom:!!document.querySelector(".leaflet-control-zoom")})');
+  assert.deepEqual(initialMap, {mode:'pan',panActive:true,zoomButtons:false,leafletZoom:false});
+  const mapFilters = await evaluate('(() => { const original=state.snapshot.tracks; state.snapshot.tracks=[{id:"car",class:"car",points:[[0,0]]},{id:"truck",class:"truck",points:[[1,1]]},{id:"person",class:"person",points:[[2,2]]},{id:"human",class:"human",points:[[3,3]]},{id:"unknown",class:"other",points:[[4,4]]}]; const all=visibleTracks().map(track=>track.id); document.getElementById("showVehicles").click(); const noVehicles=visibleTracks().map(track=>track.id); document.getElementById("showHumans").click(); const otherOnly=visibleTracks().map(track=>track.id); document.getElementById("showOther").click(); const none=visibleTracks().length; for(const id of ["showVehicles","showHumans","showOther"])document.getElementById(id).click(); const preserved=state.snapshot.tracks.length; state.snapshot.tracks=original; renderCanvas(); return {all,noVehicles,otherOnly,none,preserved}; })()');
+  assert.deepEqual(mapFilters, {all:['car','truck'],noVehicles:[],otherOnly:['person','human'],none:3,preserved:5});
   const zoneDirection = await evaluate('(() => { document.querySelector("[data-tab=rules]").click(); const rule=state.config.rules.find(item=>item.type==="zone_transition"); state.selectedRule=rule.id; state.ruleEditorOpen=true; renderFields(); return {value:document.getElementById("ruleDirection").value,options:[...document.getElementById("ruleDirection").options].map(option=>option.value),enabled:rule.enabled}; })()');
   assert.deepEqual(zoneDirection.options, ['any', 'entering', 'leaving', 'both']);
   const occupancyControls = await evaluate('(() => { const rule=state.config.rules.find(item=>item.type==="zone_transition"); const copy={...rule,id:"browser-occupancy",type:"occupancy"}; state.config.rules.push(copy); state.selectedRule=copy.id; renderFields(); const result={headingHidden:getComputedStyle(document.getElementById("headingEnabled").closest("label")).display==="none",speedHidden:getComputedStyle(document.getElementById("minSpeed").closest("label")).display==="none",directionHidden:getComputedStyle(document.getElementById("ruleDirection").closest("label")).display==="none"}; state.config.rules.pop(); state.selectedRule=rule.id; renderFields(); return result; })()');
@@ -55,10 +59,10 @@ async function main() {
   assert.equal(occupancyControls.directionHidden, true);
   await evaluate('document.querySelector("[data-tab=scene]").click(); true');
   const beforeZoom = await evaluate('backgroundMap.getZoom()');
-  await evaluate('document.getElementById("zoomOut").click(); true');
+  await evaluate('zoomMap(-1); true');
   await new Promise(resolve => setTimeout(resolve, 500));
   const afterZoom = await evaluate('backgroundMap.getZoom()');
-  await evaluate('document.getElementById("zoomIn").click(); true');
+  await evaluate('zoomMap(1); true');
   await new Promise(resolve => setTimeout(resolve, 500));
   const zoom = {before: beforeZoom, after: afterZoom, restored: await evaluate('backgroundMap.getZoom()')};
   assert.equal(zoom.after, zoom.before - 1);
@@ -131,6 +135,18 @@ async function main() {
   await dispatch('Input.dispatchMouseEvent', {type:'mouseReleased',x:headingStart.x+35,y:headingStart.y+20,button:'left',clickCount:1});
   const movedAnchor = await evaluate('(() => { const p=screen(selectedRule().heading_anchor),r=canvas.getBoundingClientRect(),ratio=devicePixelRatio||1; return [r.left+p[0]/ratio,r.top+p[1]/ratio]; })()');
   assert.ok(Math.hypot(movedAnchor[0]-headingStart.x-35,movedAnchor[1]-headingStart.y-20)<2);
+  const fresh = await evaluate('(() => { state.config=structuredClone(state.config); state.config.regions=[]; state.config.rules=[]; state.config.map_alignment.geo=null; clean(); mode("pan"); setTab("scene"); document.getElementById("newGeometry").click(); const modalOpen=!document.getElementById("geometryModal").hidden; document.getElementById("chooseLine").click(); return {modalOpen,mode:state.mode,pointerEvents:canvas.style.pointerEvents}; })()');
+  assert.equal(fresh.modalOpen, true);
+  assert.equal(fresh.mode, 'drawLine');
+  assert.equal(fresh.pointerEvents, 'auto');
+  for (const [x, y] of [[400, 500], [480, 530]]) {
+    await dispatch('Input.dispatchMouseEvent', {type:'mousePressed', x, y, button:'left', clickCount:1});
+    await dispatch('Input.dispatchMouseEvent', {type:'mouseReleased', x, y, button:'left', clickCount:1});
+  }
+  const freshLine = await evaluate('({count:state.config.regions.length,mode:state.mode,points:state.config.regions[0]?.points.length})');
+  assert.deepEqual(freshLine, {count:1, mode:'selectTool', points:2});
+  const staleDraft = await evaluate('(() => { mode("drawLine"); state.draft=[[0,0],[1,1]]; document.getElementById("newGeometry").click(); return {modalOpen:!document.getElementById("geometryModal").hidden,mode:state.mode,draft:state.draft.length}; })()');
+  assert.deepEqual(staleDraft, {modalOpen:true, mode:'selectTool', draft:0});
   console.log(JSON.stringify(initial));
   console.log(JSON.stringify({zoneDirection}));
   console.log(JSON.stringify({occupancyControls}));
@@ -141,6 +157,7 @@ async function main() {
   console.log(JSON.stringify(ruled));
   console.log(JSON.stringify({converted}));
   console.log(JSON.stringify({headingStart,headingTurned,headingSpread,movedAnchor}));
+  console.log(JSON.stringify({fresh,freshLine,staleDraft}));
   socket.close();
 }
 

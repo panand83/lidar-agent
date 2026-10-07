@@ -2,9 +2,12 @@ services:
   lidar-agent:
     build: .
     env_file:
-      - ${KLA_ENV_FILE:-/usr/src/env/.env.kla.qa}
+      - ${KLA_ENV_FILE:-/usr/src/env/kyra-lidar-agent/.env.kla.qa}
     volumes:
       - ${KLA_CONFIG_HOST_DIR:-/usr/src/lidar-config}:/usr/src/lidar-config
+      - ./data:/opt/kyra-lidar-agent/seed-data:ro
+      - ${KLA_ENV_FILE:-/usr/src/env/kyra-lidar-agent/.env.kla.qa}:/usr/src/env/kyra-lidar-agent/.env.kla.qa:ro
+      - ${KLA_LOG_HOST_DIR:-/var/log/iclogs/kyra-lidar-agent}:/var/log/iclogs/kyra-lidar-agent
     ports:
       - "8091:8091"
     restart: unless-stopped
