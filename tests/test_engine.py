@@ -124,6 +124,26 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertTrue(events[0]["sequence_complete"])
 
+    def test_sequence_info_logs_progress_and_all_completed_crossings(self):
+        settings = config("logs")
+        settings["rules"] = [settings["rules"][0]]
+        engine = LidarEngine(settings)
+        with self.assertLogs("engine", level="INFO") as captured:
+            engine.process(frame(1, -2, 0))
+            self.assertEqual(engine.process(frame(2, 2, 0)), [])
+            engine.process(frame(3, 8, 0))
+            events = engine.process(frame(4, 12, 0))
+        self.assertEqual(len(events), 1)
+        self.assertTrue(any("reason=waiting_for_next_line" in line and "progress=1/2" in line
+                            for line in captured.output))
+        trigger = next(line for line in captured.output if "Rule triggered" in line)
+        self.assertIn("rule_name=", trigger)
+        self.assertNotIn(events[0]["event_id"], trigger)
+        self.assertIn('"line":"Entry"', trigger)
+        self.assertIn('"line":"Exit"', trigger)
+        self.assertNotIn('"line_id"', trigger)
+        self.assertNotIn("crossings", events[0])
+
     def test_slow_crossing_completes_sequence_once(self):
         settings = config("slow")
         settings["rules"] = [settings["rules"][0]]
@@ -245,6 +265,51 @@ class EngineTests(unittest.TestCase):
         engine.process(frame(1, 2, 0, oid=2))
         engine.process(frame(2, 2, 0, oid=1))
         self.assertEqual(engine.process(frame(2, 12, 0, oid=2)), [])
+
+    def test_zone_tolerance_stabilizes_transition_and_occupancy_together(self):
+        settings = config("zone-tolerance")
+        settings["regions"][2]["boundary_tolerance_m"] = 0.5
+        transition = settings["rules"][1]
+        transition["debounce_ms"] = 0
+        occupancy = {"id": "count", "name": "Count", "type": "occupancy", "enabled": True,
+                     "region_id": "zone", "class_filter": ["car"], "publish_interval_ms": 100000}
+        settings["rules"] = [transition, occupancy]
+        engine = LidarEngine(settings)
+        observed = []
+        for seq, x in enumerate((0, 1.2, 0.9, 1.4, 1.6, 8.8, 9.2, 8.9, 9.6), 1):
+            events = engine.process(frame(seq, x, 0))
+            observed.append(([(event["direction"]) for event in events if event["event_type"] == "zone_transition"],
+                             [event["count"] for event in events if event["event_type"] == "occupancy"]))
+        self.assertEqual(observed[0][1], [0])
+        self.assertTrue(all(not transitions and not counts for transitions, counts in observed[1:4]))
+        self.assertEqual(observed[4], (["enter"], [1]))
+        self.assertTrue(all(not transitions and not counts for transitions, counts in observed[5:8]))
+        self.assertEqual(observed[8], (["leave"], [0]))
+
+    def test_zone_tolerance_both_waits_for_stable_exit(self):
+        settings = config("zone-tolerance-both")
+        settings["regions"][2]["boundary_tolerance_m"] = 0.5
+        rule = settings["rules"][1]
+        rule["direction_mode"] = "both"
+        settings["rules"] = [rule]
+        engine = LidarEngine(settings)
+        for seq, x in enumerate((0, 1.2, 1.6, 9.2), 1):
+            self.assertEqual(engine.process(frame(seq, x, 0)), [])
+        events = engine.process(frame(5, 9.6, 0))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["direction"], "both")
+        self.assertEqual(events[0]["entered_at"], 3)
+        self.assertEqual(events[0]["dwell_ms"], 2000)
+
+    def test_zone_tolerance_zero_preserves_raw_boundary_behavior(self):
+        settings = config("zone-zero")
+        settings["regions"][2]["boundary_tolerance_m"] = 0
+        settings["rules"] = [settings["rules"][1]]
+        settings["rules"][0]["debounce_ms"] = 0
+        engine = LidarEngine(settings)
+        engine.process(frame(1, 0, 0))
+        self.assertEqual([event["direction"] for event in engine.process(frame(2, 1.01, 0))], ["enter"])
+        self.assertEqual([event["direction"] for event in engine.process(frame(3, 0.99, 0))], ["leave"])
 
     def test_zone_heading_filter_applies_but_occupancy_ignores_it(self):
         settings = config("zone-heading")

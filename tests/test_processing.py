@@ -43,7 +43,7 @@ class ProcessingTests(unittest.TestCase):
             self.assertEqual(events[0][1]["event_type"], "line_crossing")
             self.assertIsNotNone(processor.status()["last_event_latency_ms"])
             self.assertTrue(any("Tracking frame lidar=a" in line for line in captured.output))
-            self.assertTrue(any("Event publish queued lidar=a" in line for line in captured.output))
+            self.assertFalse(any("publish queued" in line for line in captured.output))
         finally:
             processor.stop()
 

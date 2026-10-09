@@ -13,7 +13,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
-from uuid import NAMESPACE_URL, uuid4, uuid5
 
 LOG = logging.getLogger(__name__)
 MAX_ATTEMPTS = 6  # Initial attempt plus five retries.
@@ -21,6 +20,17 @@ JOB_TTL_SEC = 60
 QUEUE_LIMIT = 512
 MAX_SUBALERT_DEBOUNCE_SEC = 3600
 VEHICLE_CLASSES = {"car", "truck", "bus", "motorcycle"}
+VEHICLE_ID_EPOCH_MS = 1735689600000  # 2025-01-01 00:00:00 UTC
+
+
+def job_log_context(job):
+    parts = []
+    if job.get("rule_name"):
+        parts.append(f"rule_name={job['rule_name']}")
+    if job.get("vehicle_id"):
+        parts.append(f"vehicle_id={job['vehicle_id']}")
+    parts.append(f"lidar={job.get('lidar_name', 'Unnamed LiDAR')}")
+    return " ".join(parts)
 
 
 def project(point, geo):
@@ -35,7 +45,7 @@ def project(point, geo):
     return round(lat, 7), round(lon, 7)
 
 
-def subalert(event, mapping, geo):
+def subalert(event, mapping, geo, track_started_at=None):
     if event.get("class", "").lower() not in VEHICLE_CLASSES:
         return None
     if event.get("event_type") not in ("line_crossing", "zone_transition"):
@@ -47,13 +57,19 @@ def subalert(event, mapping, geo):
     speed_mps = float(event["speed_mps"])
     if not all(math.isfinite(value) for value in (lat, lon, speed_mps, float(event["heading_deg"]))):
         return None
-    vehicle_id = str(event["track_id"])
-    source_event_id = event.get("event_id") or str(uuid4())
-    identity = f"{event.get('lidar_id', '')}:{source_event_id}:{mapping['id']}"
-    subalert_id = uuid5(NAMESPACE_URL, identity).hex
+    digits = "".join(char for char in str(event.get("track_id", "")) if "0" <= char <= "9")
+    started_at = event["timestamp"] if track_started_at is None else track_started_at
+    try:
+        prefix = math.floor(float(started_at) * 1000) - VEHICLE_ID_EPOCH_MS
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not digits or not 0 <= prefix < 10**12:
+        return None
+    number = f"{prefix:012d}{digits[-4:].zfill(4)}"
+    vehicle_id = f"00 {' '.join(number[index:index + 4] for index in range(0, 16, 4))}"
     return {
         "eventType": "wrongway", "ruleId": mapping["external_rule_id"],
-        "eventId": f"{vehicle_id}_{subalert_id}_1793", "lat": lat, "lon": lon,
+        "eventId": f"{vehicle_id}_1793", "lat": lat, "lon": lon,
         "startMinutesOfYear": timestamp, "timestamp": timestamp,
         "startTime": timestamp, "reportedTime": timestamp,
         "broadcastType": "once", "eventSource": "IntelliConnect",
@@ -130,6 +146,7 @@ class IntegrationService:
         self.sequence = 0
         self.running = True
         self.status = {}
+        self.lidar_names = {}
         self.generations = {}
         self.subalert_debounce = {}
         self.debounce_expirations = []
@@ -146,17 +163,20 @@ class IntegrationService:
                 threading.Thread(target=self._worker, args=(work_queue,), daemon=True).start()
         threading.Thread(target=self._scheduler, daemon=True).start()
 
-    def ingest(self, lidar_id, kind, payload):
+    def ingest(self, lidar_id, kind, payload, lidar_name=None):
         if not isinstance(payload, dict) or not isinstance(payload.get("list"), list):
             raise ValueError("Configuration must contain a list array")
         parsed = parse_rse_config(payload) if kind == "rse" else parse_rule_config(payload)
         with self.condition:
+            if lidar_name:
+                self.lidar_names[lidar_id] = lidar_name
             self.catalog.setdefault(lidar_id, {})[kind] = parsed
             self.status.setdefault(lidar_id, {})[f"{kind}_received_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             self.status[lidar_id][f"{kind}_refresh_pending"] = False
-        LOG.info("Integration configuration received lidar=%s kind=%s entries=%d", lidar_id, kind, len(parsed))
+        LOG.info("Integration configuration received lidar=%s kind=%s entries=%d",
+                 self.lidar_names.get(lidar_id, "Unnamed LiDAR"), kind, len(parsed))
         if self.cache_path:
-            self._enqueue({"kind": "cache", "lidar_id": lidar_id, "created": time.monotonic(),
+            self._enqueue({"kind": "cache", "lidar_id": lidar_id, "lidar_name": self.lidar_names.get(lidar_id, "Unnamed LiDAR"), "created": time.monotonic(),
                            "expires": time.monotonic() + JOB_TTL_SEC, "attempt": 0})
 
     def snapshot(self, lidar_id):
@@ -178,7 +198,7 @@ class IntegrationService:
 
     def report_error(self, lidar_id, error):
         self._record(lidar_id, error=str(error))
-        LOG.warning("Integration dispatch failed for %s: %s", lidar_id, error)
+        LOG.warning("Integration dispatch failed lidar=%s error=%s", self.lidar_names.get(lidar_id, "Unnamed LiDAR"), error)
 
     def cancel(self, lidar_id, clear_debounce=False):
         with self.condition:
@@ -193,7 +213,7 @@ class IntegrationService:
             with self.condition:
                 if len(self.scheduled) >= QUEUE_LIMIT:
                     self.status.setdefault(job["lidar_id"], {})["error"] = "Integration schedule full; job discarded"
-                    LOG.warning("Integration schedule full lidar=%s kind=%s; job discarded", job["lidar_id"], job["kind"])
+                    LOG.warning("Integration schedule full %s kind=%s; job discarded", job_log_context(job), job["kind"])
                     return
                 self.sequence += 1
                 heapq.heappush(self.scheduled, (time.monotonic() + delay, self.sequence, job))
@@ -213,11 +233,15 @@ class IntegrationService:
             except queue.Full:
                 pass
             self._record(job["lidar_id"], error="Integration queue full; oldest job discarded")
-            LOG.warning("Integration queue full lidar=%s kind=%s; oldest job discarded", job["lidar_id"], job["kind"])
+            LOG.warning("Integration queue full %s kind=%s; oldest job discarded", job_log_context(job), job["kind"])
 
-    def dispatch(self, lidar_id, config, event, mqtt_client):
+    def dispatch(self, lidar_id, config, event, mqtt_client, track_started_at=None):
         integrations = config.get("integrations", {})
+        lidar_name = config.get("name") or self.lidar_names.get(lidar_id, "Unnamed LiDAR")
+        rule_name = event.get("rule_name") or next((item.get("name") for item in config.get("rules", [])
+                                                    if item.get("id") == event.get("rule_id")), None) or "Unnamed rule"
         with self.condition:
+            self.lidar_names[lidar_id] = lidar_name
             catalog = copy.deepcopy(self.catalog.get(lidar_id, {}))
         for mapping in integrations.get("mappings", []):
             if not mapping.get("enabled") or mapping.get("rule_id") != event.get("rule_id"):
@@ -225,14 +249,14 @@ class IntegrationService:
             rule = catalog.get("rule", {}).get(mapping.get("external_rule_id"))
             if not rule or not rule["active"]:
                 self._record(lidar_id, error="Mapped external rule configuration unavailable")
-                LOG.warning("Subalert skipped lidar=%s mapping=%s event=%s: external rule unavailable",
-                            lidar_id, mapping["id"], event.get("event_id"))
+                LOG.warning("Subalert skipped rule_name=%s lidar=%s reason=external_rule_unavailable",
+                            rule_name, lidar_name)
                 continue
-            payload = subalert(event, mapping, config.get("map_alignment", {}).get("geo"))
+            payload = subalert(event, mapping, config.get("map_alignment", {}).get("geo"), track_started_at)
             if payload is None:
                 self._record(lidar_id, error="Subalert needs vehicle class, alignment, position and heading")
-                LOG.warning("Subalert skipped lidar=%s mapping=%s event=%s: required vehicle or alignment data missing",
-                            lidar_id, mapping["id"], event.get("event_id"))
+                LOG.warning("Subalert skipped rule_name=%s lidar=%s reason=invalid_vehicle_or_alignment_data",
+                            rule_name, lidar_name)
                 continue
             now = time.monotonic()
             with self.condition:
@@ -244,8 +268,8 @@ class IntegrationService:
                 debounce_key = (lidar_id, mapping["id"])
                 last = self.subalert_debounce.get(debounce_key)
                 if last is not None and now - last < debounce_sec:
-                    LOG.debug("Subalert debounced lidar=%s mapping=%s event=%s remaining_sec=%.2f",
-                              lidar_id, mapping["id"], event.get("event_id"), debounce_sec - (now - last))
+                    LOG.info("Subalert skipped rule_name=%s vehicle_id=%s lidar=%s reason=debounce remaining_sec=%.2f",
+                             rule_name, payload["vehicleId"], lidar_name, debounce_sec - (now - last))
                     continue
                 self.subalert_debounce[debounce_key] = now
                 heapq.heappush(self.debounce_expirations, (now + MAX_SUBALERT_DEBOUNCE_SEC, debounce_key, now))
@@ -261,19 +285,23 @@ class IntegrationService:
                     repetitions = 12 if expected == "Illuminator" else 1
                     interval = int(integrations.get("illuminator_interval_sec", 5))
                     for index in range(repetitions):
-                        self._enqueue({"kind": "device", "lidar_id": lidar_id, "created": now,
+                        self._enqueue({"kind": "device", "lidar_id": lidar_id, "lidar_name": lidar_name,
+                                       "rule_name": rule_name, "vehicle_id": payload["vehicleId"], "created": now,
                                        "generation": generation,
                                        "attempt": 0, "device": device,
                                        "expires": now + interval * 11 + JOB_TTL_SEC if expected == "Illuminator" else now + JOB_TTL_SEC},
                                       delay=index * interval if index else 0)
-            self._enqueue({"kind": "publish", "lidar_id": lidar_id, "created": now, "attempt": 0,
+            self._enqueue({"kind": "publish", "lidar_id": lidar_id, "lidar_name": lidar_name,
+                           "rule_name": rule_name, "vehicle_id": payload["vehicleId"], "created": now, "attempt": 0,
                            "generation": generation,
                            "expires": now + JOB_TTL_SEC, "client": mqtt_client,
                            "topic": integrations.get("subalert_topic", "subalert"),
                            "qos": int(config["mqtt"].get("qos", 1)), "payload": json.dumps(payload)})
             self._record(lidar_id, last_subalert=payload["timestamp"], error="")
-            LOG.info("Subalert requested lidar=%s mapping=%s event=%s external_rule=%s zone=%s",
-                     lidar_id, mapping["id"], event.get("event_id"), mapping.get("external_rule_id"), mapping["zone"])
+            LOG.info("Subalert generated rule_name=%s vehicle_id=%s lidar=%s external_rule=%s zone=%s topic=%s",
+                     rule_name, payload["vehicleId"], lidar_name,
+                     rule["name"] if rule["name"] != rule["id"] else "Unnamed external rule", mapping["zone"],
+                     integrations.get("subalert_topic", "subalert"))
 
     def _scheduler(self):
         while self.running:
@@ -303,24 +331,23 @@ class IntegrationService:
 
     def _run_job(self, job):
         if time.monotonic() > job["expires"]:
-            LOG.debug("Integration job expired lidar=%s kind=%s", job["lidar_id"], job["kind"])
+            LOG.debug("Integration job expired %s kind=%s", job_log_context(job), job["kind"])
             return
         with self.condition:
             if job.get("generation", self.generations.get(job["lidar_id"], 0)) != self.generations.get(job["lidar_id"], 0):
-                LOG.debug("Integration job canceled lidar=%s kind=%s", job["lidar_id"], job["kind"])
+                LOG.debug("Integration job canceled %s kind=%s", job_log_context(job), job["kind"])
                 return
         try:
             if job["kind"] == "publish":
                 result = job["client"].publish(job["topic"], job["payload"], qos=job["qos"])
                 if result.rc != 0:
                     raise OSError(f"MQTT publish failed: {result.rc}")
-                LOG.info("Subalert publish queued lidar=%s topic=%s", job["lidar_id"], job["topic"])
             elif job["kind"] == "device":
                 self.http_get(job["device"])
                 device = job["device"]
                 level = logging.INFO if device.get("type") == "Flasher" else logging.DEBUG
-                LOG.log(level, "Device request succeeded lidar=%s type=%s device=%s",
-                        job["lidar_id"], device.get("type"), device.get("name") or device.get("id"))
+                LOG.log(level, "Device request succeeded %s type=%s device=%s", job_log_context(job),
+                        device.get("type"), device.get("name") or "Unnamed device")
             else:
                 with self.cache_write_lock:
                     with self.condition:
@@ -329,16 +356,16 @@ class IntegrationService:
                     temporary = self.cache_path.with_suffix(".tmp")
                     temporary.write_text(serialized, encoding="utf-8")
                     temporary.replace(self.cache_path)
-                LOG.debug("Integration configuration cache written lidar=%s", job["lidar_id"])
+                LOG.debug("Integration configuration cache written lidar=%s", job.get("lidar_name", "Unnamed LiDAR"))
         except Exception as exc:
             if job["attempt"] < MAX_ATTEMPTS - 1:
                 job["attempt"] += 1
-                LOG.warning("Integration job retry lidar=%s kind=%s attempt=%d/%d error=%s",
-                            job["lidar_id"], job["kind"], job["attempt"] + 1, MAX_ATTEMPTS, exc)
+                LOG.warning("Integration job retry %s kind=%s attempt=%d/%d error=%s",
+                            job_log_context(job), job["kind"], job["attempt"] + 1, MAX_ATTEMPTS, exc)
                 self._enqueue(job, delay=min(0.25 * 2 ** job["attempt"], 5))
             else:
                 self._record(job["lidar_id"], error=str(exc))
-                LOG.warning("Integration job failed for %s: %s", job["lidar_id"], exc)
+                LOG.warning("Integration job failed %s kind=%s error=%s", job_log_context(job), job["kind"], exc)
 
     def stop(self):
         self.running = False

@@ -131,8 +131,7 @@ function paintOverlay() {
       ctx.beginPath(); ctx.moveTo(...first); ctx.lineTo(...last); ctx.stroke();
     }
   }
-  const recent = (state.snapshot?.events || []).filter(event => Date.now() / 1000 - event.timestamp < 2);
-  const highlighted = new Set(recent.flatMap(event => [...(event.line_region_ids || []), event.line_region_id, event.region_id]));
+  const highlighted = new Set([...state.geometryAlertUntil].filter(([, until]) => until > Date.now()).map(([id]) => id));
   const assigned = new Set(state.config.rules.flatMap(rule => rule.line_region_ids?.length ? rule.line_region_ids : [rule.region_id]));
   const occupied = new Set(state.config.rules.filter(rule => rule.enabled && rule.type === 'occupancy').filter(rule =>
     (state.snapshot?.tracks || []).some(track => {
@@ -194,10 +193,7 @@ function paintOverlay() {
     line(track.points, '#ffd54f', 2);
     if (state.snapshot.status?.last_message - track.time > 2) continue;
     const point = screen([track.x, track.y]);
-    ctx.fillStyle = track.class === 'car' ? '#32d296' : ['person', 'human'].includes(track.class) ? '#f472b6' : '#ef6b77';
-    ctx.beginPath();
-    ctx.arc(point[0], point[1], 5 * (devicePixelRatio || 1), 0, Math.PI * 2);
-    ctx.fill();
+    drawTrackMarker(track, point);
     drawTrackId(track, point);
   }
   if (state.draft.length) line(state.draft, '#ffd54f', 2, [5, 5]);
@@ -208,7 +204,7 @@ function drawTrackId(track, point) {
   const label = String(track.id);
   ctx.font = `${12 * ratio}px Segoe UI, Arial, sans-serif`;
   const width = ctx.measureText(label).width + 8 * ratio;
-  const x = point[0] + 9 * ratio, y = point[1] - 17 * ratio;
+  const x = point[0] + (['car', 'human', 'person'].includes(track.class) ? 13 : 9) * ratio, y = point[1] - 17 * ratio;
   ctx.fillStyle = '#07112de6';
   ctx.fillRect(x, y, width, 19 * ratio);
   ctx.fillStyle = '#fff';
@@ -388,6 +384,12 @@ poll = async function () {
   await basePoll();
   updateCaptureTracks();
   renderCalibrationGuide();
+};
+
+const basePollLive = pollLive;
+pollLive = async function () {
+  await basePollLive();
+  if (state.tab === 'calibration') updateCaptureTracks();
 };
 
 fit = function () {

@@ -104,6 +104,8 @@ flowchart TD
 
 `Any` emits separate Enter and Leave events, subject to debounce. `Entering` accepts only Enter; `Leaving` accepts only Leave. `Both` emits only after the same track enters and later leaves. In `Both` mode the stored entry is consumed on exit before debounce is checked, so a debounced exit does not remain pending. Starting inside a zone does not create a stored entry. A track reset clears entry state.
 
+Polygon geometry has an optional `boundary_tolerance_m` (default 0). Each track keeps a stable inside/outside state per polygon and point mode. Once the track crosses a boundary, its state changes only when its current point is farther than the tolerance past the closest polygon edge. Zone transitions and occupancy counts use the same state; the tolerance does not replace rule debounce or occupancy publish interval. At 0, the raw point-in-polygon result is used. State is cleared when the track is reset or expires.
+
 ## Timing And Persistence
 
 - Track identity is `(frame_id, sensor_id, object_id)`. A new track is created for a missing ID, non-increasing timestamp, gap over `max_gap_sec` (default 5 seconds), or position jump over `max_jump_m` (default 25 meters).

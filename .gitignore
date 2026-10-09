@@ -4,6 +4,7 @@ data/lidars/
 data/lidars.json.migrated*
 data/integrations-cache.json
 data/*.tmp
+data/diagnostics/
 .env.kla.qa
 
 # Local development and browser-test artifacts.

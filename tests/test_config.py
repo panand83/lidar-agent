@@ -4,6 +4,7 @@ import json
 import logging
 import tempfile
 import threading
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -14,6 +15,123 @@ from engine import LidarEngine
 
 
 class ConfigTests(unittest.TestCase):
+    def test_live_endpoint_only_returns_track_heads(self):
+        engine = LidarEngine(default_lidar("live"))
+        engine.tracks[("frame", "sensor", "7")] = {
+            "id": "7", "sensor": "sensor", "frame": "frame", "class": "car",
+            "pos": (12.0, 3.0), "time": 100.0, "history": [(10.0, 2.0), (12.0, 3.0)],
+        }
+        engine.last_message = 100.0
+        engine.last_received = 101.0
+        engine.events.appendleft({"event_id": "older", "rule_id": "rule-a", "rule_name": "Crossing",
+                                  "event_type": "line_crossing", "direction": "forward", "timestamp": 99.0})
+        engine.events.appendleft({"event_id": "newer", "rule_id": "rule-a", "rule_name": "Crossing",
+                                  "event_type": "line_crossing", "direction": "forward", "timestamp": 100.0,
+                                  "line_region_id": "line-b", "line_region_ids": ["line-a", "line-b"],
+                                  "centroid": [12.0, 3.0]})
+        processor = SimpleNamespace(lock=threading.RLock(), engine=engine)
+        with patch.object(app, "PROCESSORS", {"live": processor}):
+            handler = SimpleNamespace(path="/api/lidars/live/live?after=older", send_json=Mock())
+            app.Handler.do_GET(handler)
+        payload = handler.send_json.call_args.args[0]
+        self.assertEqual(payload["status"]["tracks"], 1)
+        self.assertEqual(payload["tracks"], [{"id": "7", "sensor": "sensor", "frame": "frame",
+                                              "class": "car", "x": 12.0, "y": 3.0, "time": 100.0}])
+        self.assertNotIn("config", payload)
+        self.assertNotIn("points", payload["tracks"][0])
+        self.assertEqual([event["event_id"] for event in payload["events"]], ["newer"])
+        self.assertEqual(payload["events"][0]["line_region_ids"], ["line-a", "line-b"])
+        self.assertNotIn("centroid", payload["events"][0])
+        self.assertEqual(engine.snapshot()["tracks"][0]["points"], [(10.0, 2.0), (12.0, 3.0)])
+
+    def test_backup_get_returns_saved_per_lidar_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = default_lidar("backup")
+            config["mqtt"]["password"] = "stored-secret"
+            with patch.object(app, "DATA", Path(directory) / "lidars.json"), \
+                 patch.object(app, "ENGINES", {"backup": LidarEngine(config)}):
+                app.save("backup")
+                response = BytesIO()
+                handler = SimpleNamespace(path="/api/lidars/backup/backup", wfile=response,
+                                          send_response=Mock(), send_header=Mock(), end_headers=Mock(), send_json=Mock())
+                app.Handler.do_GET(handler)
+                self.assertEqual(response.getvalue(), app.lidar_file("backup").read_bytes())
+                self.assertEqual(json.loads(response.getvalue())["mqtt"]["password"], "stored-secret")
+                handler.send_header.assert_any_call("Content-Disposition", 'attachment; filename="backup.json"')
+                handler.send_header.assert_any_call("Cache-Control", "no-store")
+
+    def test_restore_creates_and_explicitly_replaces_only_matching_lidar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = default_lidar("restored")
+            config["enabled"] = False
+            config["mqtt"]["password"] = "saved-secret"
+            config["regions"] = [{"id": "zone", "name": "Zone", "type": "polygon",
+                                  "points": [[0, 0], [10, 0], [10, 10], [0, 10]]}]
+            config["rules"] = [{"id": "count", "name": "Count", "type": "occupancy", "region_id": "zone",
+                                "class_filter": ["car"], "publish_interval_ms": 500}]
+            processor = SimpleNamespace(lock=threading.RLock(), reset=Mock())
+            with patch.object(app, "DATA", Path(directory) / "lidars.json"), \
+                 patch.object(app, "ENGINES", {}), patch.object(app, "PROCESSORS", {}), \
+                 patch.object(app, "new_processor", return_value=processor), \
+                 patch.object(app, "connect") as connect, patch.object(app.INTEGRATIONS, "cancel") as cancel:
+                self.assertEqual(app.restore_lidar_config(config), "restored")
+                saved = json.loads(app.lidar_file("restored").read_text(encoding="utf-8"))
+                self.assertEqual(saved["regions"], config["regions"])
+                self.assertEqual(saved["rules"], config["rules"])
+                self.assertEqual(saved["mqtt"]["password"], "saved-secret")
+                self.assertEqual(config["mqtt"]["event_topic"], "events")
+                self.assertEqual(connect.call_count, 1)
+                processor.engine = app.ENGINES["restored"]
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    app.restore_lidar_config(config)
+                self.assertEqual(processor.reset.call_count, 0)
+                updated = {**config, "name": "Restored Name"}
+                self.assertEqual(app.restore_lidar_config(updated, replace=True), "restored")
+                self.assertEqual(app.ENGINES["restored"].config["name"], "Restored Name")
+                self.assertEqual(processor.reset.call_count, 1)
+                cancel.assert_called_once_with("restored")
+                self.assertEqual(connect.call_count, 2)
+                with self.assertRaisesRegex(ValueError, "does not exist"):
+                    app.restore_lidar_config({**config, "id": "new-id"}, replace=True)
+                with self.assertRaisesRegex(ValueError, "exact ID"):
+                    app.restore_lidar_config({**config, "id": "RESTORED"}, replace=True)
+                self.assertEqual(set(app.ENGINES), {"restored"})
+
+    def test_failed_restore_write_does_not_reset_live_agent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = default_lidar("existing")
+            engine = LidarEngine(config)
+            processor = SimpleNamespace(lock=threading.RLock(), engine=engine, reset=Mock())
+            with patch.object(app, "DATA", Path(directory) / "lidars.json"), \
+                 patch.object(app, "ENGINES", {"existing": engine}), \
+                 patch.object(app, "PROCESSORS", {"existing": processor}), \
+                 patch.object(app, "write_config", side_effect=OSError("disk full")), \
+                 patch.object(app.INTEGRATIONS, "cancel") as cancel:
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    app.restore_lidar_config({**config, "name": "Replacement"}, replace=True)
+                self.assertIs(engine.config, config)
+                processor.reset.assert_not_called()
+                cancel.assert_not_called()
+
+    def test_restore_rejects_non_object_backup(self):
+        for backup in (None, [], "text"):
+            with self.assertRaisesRegex(ValueError, "one LiDAR configuration object"):
+                app.restore_lidar_config(backup)
+        with self.assertRaisesRegex(ValueError, "missing LiDAR settings"):
+            app.restore_lidar_config({"id": "incomplete"})
+
+    def test_polygon_boundary_tolerance_validation(self):
+        config = default_lidar("tolerance")
+        config["regions"] = [{"id": "zone", "name": "Zone", "type": "polygon",
+                              "points": [[0, 0], [10, 0], [10, 10], [0, 10]]}]
+        validate(config)
+        config["regions"][0]["boundary_tolerance_m"] = 0.5
+        validate(config)
+        for value in (-0.1, float("nan"), float("inf")):
+            config["regions"][0]["boundary_tolerance_m"] = value
+            with self.assertRaisesRegex(ValueError, "boundary_tolerance_m"):
+                validate(config)
+
     def test_mqtt_client_ids_are_distinct_per_lidar_and_process(self):
         first = app.mqtt_client_id("lidar-137")
         self.assertEqual(first, app.mqtt_client_id("lidar-137"))
@@ -62,13 +180,18 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "KLA_LOG_MAX_MB"):
                     app.log_max_bytes()
 
-    def test_logging_defaults_to_debug_and_accepts_info(self):
+    def test_logging_defaults_to_info_and_accepts_debug(self):
         with patch.dict(os.environ, {"KLA_LOG_DIR": ""}, clear=True), patch.object(app.logging, "basicConfig") as configure:
             app.configure_logging()
-            self.assertEqual(configure.call_args.kwargs["level"], logging.DEBUG)
-        with patch.dict(os.environ, {"KLA_LOG_DIR": "", "KLA_LOG_LEVEL": "INFO"}), patch.object(app.logging, "basicConfig") as configure:
-            app.configure_logging()
             self.assertEqual(configure.call_args.kwargs["level"], logging.INFO)
+            self.assertIn("%(msecs)03d", configure.call_args.kwargs["format"])
+            formatter = logging.Formatter(configure.call_args.kwargs["format"],
+                                          datefmt=configure.call_args.kwargs["datefmt"])
+            record = logging.LogRecord("test", logging.INFO, __file__, 1, "Sample", (), None)
+            self.assertRegex(formatter.format(record), r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} INFO test: Sample")
+        with patch.dict(os.environ, {"KLA_LOG_DIR": "", "KLA_LOG_LEVEL": "DEBUG"}), patch.object(app.logging, "basicConfig") as configure:
+            app.configure_logging()
+            self.assertEqual(configure.call_args.kwargs["level"], logging.DEBUG)
 
     def test_invalid_logging_level_is_rejected(self):
         with patch.dict(os.environ, {"KLA_LOG_LEVEL": "TRACE"}):

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import app
 from engine import LidarEngine
-from integrations import IntegrationService, parse_rse_config, parse_rule_config, subalert
+from integrations import IntegrationService, VEHICLE_ID_EPOCH_MS, parse_rse_config, parse_rule_config, subalert
 
 
 GEO = {"lat": 30.4, "lon": -84.2, "heading": 0, "origin_x": 0,
@@ -39,11 +39,18 @@ class FakeClient:
 class IntegrationTests(unittest.TestCase):
     def test_payload_uses_intelliconnect_fields_and_projected_position(self):
         payload = subalert(EVENT, MAPPING, GEO)
-        self.assertTrue(payload["eventId"].startswith("123_"))
-        self.assertTrue(payload["eventId"].endswith("_1793"))
+        prefix = int(EVENT["timestamp"] * 1000) - VEHICLE_ID_EPOCH_MS
+        number = f"{prefix:012d}0123"
+        vehicle_id = f"00 {' '.join(number[index:index + 4] for index in range(0, 16, 4))}"
+        self.assertEqual(payload["vehicleId"], vehicle_id)
+        self.assertEqual(payload["eventId"], f"{vehicle_id}_1793")
         self.assertEqual(payload["eventId"], subalert(EVENT, MAPPING, GEO)["eventId"])
-        self.assertNotEqual(payload["eventId"], subalert({**EVENT, "event_id": "event-two"}, MAPPING, GEO)["eventId"])
-        self.assertNotEqual(payload["eventId"], subalert(EVENT, {**MAPPING, "id": "mapping-two"}, GEO)["eventId"])
+        self.assertEqual(payload["eventId"], subalert({**EVENT, "event_id": "event-two"}, MAPPING, GEO)["eventId"])
+        self.assertEqual(payload["eventId"], subalert(EVENT, {**MAPPING, "id": "mapping-two"}, GEO)["eventId"])
+        self.assertEqual(payload["vehicleId"], subalert({**EVENT, "timestamp": EVENT["timestamp"] + 2}, MAPPING, GEO,
+                                                         track_started_at=EVENT["timestamp"])["vehicleId"])
+        self.assertNotEqual(payload["vehicleId"], subalert(EVENT, MAPPING, GEO,
+                                                            track_started_at=EVENT["timestamp"] + 1)["vehicleId"])
         self.assertEqual(payload["ruleId"], "external-rule")
         self.assertEqual(payload["zone"], 1)
         self.assertEqual(payload["lat"], 30.4)
@@ -57,6 +64,13 @@ class IntegrationTests(unittest.TestCase):
         self.assertIsNone(subalert(EVENT, MAPPING, None))
         self.assertIsNone(subalert({**EVENT, "heading_deg": None}, MAPPING, GEO))
         self.assertIsNone(subalert({**EVENT, "class": "human"}, MAPPING, GEO))
+
+    def test_vehicle_id_uses_last_four_object_digits_and_rejects_invalid_time(self):
+        payload = subalert({**EVENT, "track_id": "19960"}, MAPPING, GEO)
+        self.assertTrue(payload["vehicleId"].endswith(" 9960"))
+        self.assertIsNone(subalert({**EVENT, "track_id": "car"}, MAPPING, GEO))
+        self.assertIsNone(subalert(EVENT, MAPPING, GEO, track_started_at=1735689599))
+        self.assertIsNone(subalert(EVENT, MAPPING, GEO, track_started_at=float("inf")))
 
     def test_external_config_parses_device_and_rule_assignments(self):
         self.assertEqual(parse_rse_config(RSE)["flasher-1"]["host"], "192.168.1.10")
@@ -148,6 +162,27 @@ class IntegrationTests(unittest.TestCase):
         self.assertFalse(service.subalert_debounce)
         self.assertFalse(service.debounce_expirations)
 
+    def test_info_logs_generated_subalert_and_debounce_skip_with_ids(self):
+        service = IntegrationService(start_workers=False)
+        service.ingest("lidar-a", "rule", RULE)
+        mapping = {**MAPPING, "debounce_sec": 5}
+        config = {"name": "Detection Zone", "map_alignment": {"geo": GEO}, "mqtt": {"qos": 1},
+                  "integrations": {"subalert_topic": "subalert", "mappings": [mapping]}}
+        with self.assertLogs("integrations", level="INFO") as captured:
+            service.dispatch("lidar-a", config, {**EVENT, "rule_name": "Crossing"}, FakeClient())
+            service.dispatch("lidar-a", config, {**EVENT, "rule_name": "Crossing", "event_id": "event-two"}, FakeClient())
+        payload = json.loads(service.pending.queue[0]["payload"])
+        generated = next(line for line in captured.output if "Subalert generated" in line)
+        skipped = next(line for line in captured.output if "reason=debounce" in line)
+        for line in (generated, skipped):
+            self.assertIn(f"vehicle_id={payload['vehicleId']}", line)
+            self.assertIn(f"rule_name=Crossing vehicle_id={payload['vehicleId']} lidar=Detection Zone", line)
+            self.assertNotIn("source_event_id", line)
+            self.assertNotIn("subalert_event_id", line)
+        self.assertNotIn("event-one", generated)
+        self.assertNotIn("event-two", skipped)
+        self.assertEqual(service.pending.qsize(), 1)
+
     def test_invalid_subalert_does_not_start_debounce(self):
         service = IntegrationService(start_workers=False)
         service.ingest("lidar-a", "rule", RULE)
@@ -177,6 +212,40 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(client.sent[0][1]["event_type"], "line_crossing")
         self.assertIn("event_id", client.sent[0][1])
         self.assertNotIn("eventType", client.sent[0][1])
+
+    def test_mapped_alert_reuses_track_start_time_without_changing_events(self):
+        config = app.default_lidar("lidar-a")
+        config["sensor_id"] = "f"
+        config["map_alignment"]["geo"] = GEO
+        config["regions"] = [{"id": "line", "type": "line", "points": [[0, -1], [0, 1]],
+                              "forward_hint": [1, 0], "line_direction": "forward"}]
+        config["rules"] = [{"id": "local-rule", "name": "Cross", "type": "line_crossing",
+                            "line_region_ids": ["line"], "class_filter": ["car"], "debounce_ms": 0}]
+        config["integrations"]["mappings"] = [MAPPING]
+        engine = LidarEngine(config)
+        service = IntegrationService(start_workers=False)
+        service.ingest("lidar-a", "rule", RULE)
+        client = FakeClient()
+        first_stamp = 1791214725
+        with patch.object(app, "INTEGRATIONS", service):
+            for offset, x in enumerate((-2, 2, -2, 2, -2, 2), 0):
+                stamp = first_stamp + offset if offset < 4 else first_stamp + offset + 6
+                payload = {"header": {"frame_id": "f", "stamp": {"secs": stamp}},
+                           "objects": [{"id": 19960, "sensor_id": "s1", "predicted_class": "car",
+                                        "centroid": {"x": x, "y": 0}}]}
+                app.process_tracking(engine, payload, client)
+        alerts = [json.loads(job["payload"]) for job in service.pending.queue if job["kind"] == "publish"]
+        self.assertEqual(len(alerts), 3)
+        self.assertEqual(alerts[0]["vehicleId"], alerts[1]["vehicleId"])
+        self.assertNotEqual(alerts[1]["vehicleId"], alerts[2]["vehicleId"])
+        self.assertTrue(all(alert["vehicleId"].endswith(" 9960") for alert in alerts))
+        self.assertEqual([alert["eventId"] for alert in alerts],
+                         [f"{alert['vehicleId']}_1793" for alert in alerts])
+        self.assertEqual(len(client.sent), 3)
+        self.assertEqual({topic for topic, _, _ in client.sent}, {"events"})
+        self.assertEqual(len({event["event_id"] for _, event, _ in client.sent}), 3)
+        self.assertTrue(all("vehicleId" not in event and "track_started_at" not in event
+                            for _, event, _ in client.sent))
 
     def test_device_failure_gets_five_retries_and_does_not_block_publish(self):
         calls = []

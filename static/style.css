@@ -97,6 +97,10 @@ canvas.editing { cursor: crosshair; }
 .ruleRow.eventFlash .iconButton { background: #fff1a4; border-color: #ac861d; color: #17202d; }
 .ruleRow.eventFlash .iconButton.danger { color: #a8324a; }
 .editorModalBox { display: flex; flex-direction: column; width: min(520px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: hidden; }
+.editorModalBox > h2 { cursor: grab; touch-action: none; user-select: none; }
+.editorModalBox > h2:active { cursor: grabbing; }
+.modalBackdrop.headingActive { background: transparent; pointer-events: none; }
+.modalBackdrop.headingActive .editorModalBox { pointer-events: auto; box-shadow: 0 12px 36px #000b; }
 .ruleEditorModalBox { width: min(640px, calc(100vw - 24px)); }
 .editorModalBox #geometryEdit, .editorModalBox #ruleEdit { min-height: 0; overflow-y: auto; padding-right: 5px; }
 .editorModalBox #geometryEdit h3, .editorModalBox #ruleEdit h3 { display: none; }
@@ -108,14 +112,36 @@ canvas.editing { cursor: crosshair; }
 .ruleFormGrid #sequenceFields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
 .ruleFormGrid #sequenceFields label { min-width: 0; margin: 0; }
 .ruleFormGrid > .row { margin: 0; }
+.ruleFormGrid > .headingToolRow { align-items: center; }
+.headingToolRow #headingTool { flex: 0 1 300px; }
+.headingToolRow .fieldInfo { flex: 0 0 16px; margin: 0; }
+.ruleFormGrid > label:has(#headingEnabled) { display: flex; align-items: center; gap: 4px; color: var(--text); font-size: 13px; }
+.ruleFormGrid > label:has(#headingEnabled) input { flex: 0 0 auto; margin: 0; }
+.ruleFormGrid > label:has(#headingEnabled) .fieldInfo { margin-left: 2px; }
 .ruleFormGrid > .danger { justify-self: start; }
 .editorModalActions { display: flex; flex: 0 0 auto; justify-content: flex-end; gap: 8px; padding: 12px 0 0; margin-top: 14px; background: #111e3d; border-top: 1px solid var(--border); }
-@media (max-width: 700px) { .ruleFormGrid, .ruleFormGrid #sequenceFields { grid-template-columns: 1fr; } .ruleFormGrid #ruleClassChoices { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .ruleFormGrid, .ruleFormGrid #sequenceFields { grid-template-columns: 1fr; } .ruleFormGrid #ruleClassChoices { grid-template-columns: repeat(2, minmax(0, 1fr)); } .modalBackdrop.headingActive .ruleEditorModalBox { max-height: 50vh; } }
 @media (max-width: 1050px) { .ruleRow { grid-template-columns: 36px minmax(0, 1fr) 1px 38px 28px 28px; gap: 4px; padding: 7px 8px; } .geometryRow { grid-template-columns: 36px minmax(0, 1fr) 68px 28px 28px; gap: 4px; padding: 7px 8px; } .geometryTypeIcon { width: 36px; height: 36px; } .geometryTypeIcon svg { width: 28px; height: 28px; } .geometryName, .ruleName { font-size: 13px; } .geometryTypeChip { width: 68px; gap: 4px; font-size: 10px; } .geometryTypeChip .lineMark { width: 12px; } .ruleRow .iconButton, .geometryRow .iconButton { width: 28px; height: 28px; } }
 .brandLogo { position: relative; display: block; flex: 0 0 36px; width: 36px; height: 44px; overflow: hidden; }
 .brandLogo img { position: absolute; left: 0; top: 0; display: block; width: auto; max-width: none; height: 44px; }
 .brandName { min-width: 0; }
 .brandName strong { white-space: nowrap; }
+.fieldInfo { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; margin-left: 6px; border: 1px solid #718ab5; border-radius: 50%; color: #c2d5f5; font-size: 11px; font-style: normal; font-weight: 700; line-height: 1; vertical-align: middle; cursor: help; }
+.fieldInfo:hover, .fieldInfo:focus-visible { border-color: #c2d5f5; color: #fff; outline: 2px solid #8db3ff; outline-offset: 2px; }
+.ruleFormGrid > .toggleControl .fieldInfo { position: absolute; left: 42px; top: 6px; margin: 0; }
+.editorHelpTooltip { position: fixed; z-index: 80; width: min(270px, calc(100vw - 20px)); padding: 8px 10px; border: 1px solid #6d89b9; border-radius: 5px; background: #1c2b4b; color: #f2f6ff; box-shadow: 0 8px 18px #0008; font-size: 12px; line-height: 1.35; pointer-events: none; }
+.editorHelpTooltip[hidden] { display: none; }
+.lidarSetupBox { width: min(440px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow-y: auto; }
+.lidarSetupModes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; padding: 3px; border: 1px solid var(--border); border-radius: 5px; background: #0b1731; }
+.lidarSetupModes button { min-width: 0; border: 0; background: transparent; }
+.lidarSetupModes button.active { background: var(--blue); }
+.lidarSetupBox form label { margin: 14px 0; }
+.lidarSetupActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.lidarBackupDetails { min-height: 16px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.lidarSetupError { min-height: 16px; color: #ff8d97; font-size: 12px; overflow-wrap: anywhere; }
+.lidarPanelActions { display: flex; gap: 8px; margin-top: 16px; }
+.lidarPanelActions button { min-width: 0; flex: 1; }
+@media (max-width: 760px) { .lidarPanelActions { flex-wrap: wrap; } .lidarPanelActions button { flex-basis: 100%; } }
 .sidehead { display: grid; grid-template-columns: 1fr; align-items: stretch; gap: 8px; margin-bottom: 10px; }
 .sidehead .addAction { width: 100%; justify-content: center; }
 #lidars { display: grid; gap: 7px; }

@@ -69,7 +69,8 @@ class LidarProcessor:
                         self.dropped_frames += 1
                     except queue.Empty:
                         break
-                LOG.error("Tracking queue full for LiDAR %s; discarding backlog and resynchronizing", self.engine.config["id"])
+                LOG.error("Tracking queue full lidar=%s; discarding backlog and resynchronizing",
+                          self.engine.config.get("name", "Unnamed LiDAR"))
                 return False
             return True
 
@@ -92,10 +93,8 @@ class LidarProcessor:
             self.filtered_frames += 1
             count = self.filtered_frames
         if count == 1 or count % 100 == 0:
-            header = payload.get("header", {}) if isinstance(payload, dict) else {}
-            frame_id = header.get("frame_id") if isinstance(header, dict) else None
-            LOG.debug("Tracking frame filtered lidar=%s source=%s expected_frame=%r received_frame=%r total=%d",
-                      self.engine.config["id"], source, str(sensor_filter)[:128], str(frame_id)[:128], count)
+            LOG.debug("Tracking frame filtered lidar=%s source=%s total=%d",
+                      self.engine.config.get("name", "Unnamed LiDAR"), source, count)
 
     def activate(self):
         with self.admission_lock:
@@ -157,7 +156,7 @@ class LidarProcessor:
                         event_count = self.process(self.engine, payload, client)
                     except Exception as exc:
                         self.engine.error = f"Message error: {exc}"
-                        LOG.exception("Tracking failed for LiDAR %s", self.engine.config["id"])
+                        LOG.exception("Tracking failed for LiDAR %s", self.engine.config.get("name", "Unnamed LiDAR"))
                         continue
                     finished_at = time.monotonic()
                     processing_ms = (finished_at - started_at) * 1000
@@ -174,13 +173,11 @@ class LidarProcessor:
                         self.max_event_latency_ms = max(self.max_event_latency_ms, latency_ms)
                         self.event_latency_samples.append(latency_ms)
                     if LOG.isEnabledFor(logging.DEBUG):
-                        header = payload.get("header", {}) if isinstance(payload, dict) else {}
-                        frame_id = header.get("frame_id") if isinstance(header, dict) else None
                         if self.engine.messages == messages_before:
-                            LOG.debug("Tracking payload ignored lidar=%s frame=%s", self.engine.config["id"], frame_id)
+                            LOG.debug("Tracking payload ignored lidar=%s", self.engine.config.get("name", "Unnamed LiDAR"))
                         else:
-                            LOG.debug("Tracking frame lidar=%s frame=%s objects=%s valid=%s tracks=%d events=%d queue_depth=%d queue_wait_ms=%.2f processing_ms=%.2f",
-                                      self.engine.config["id"], frame_id, self.engine.raw_in_last_message,
+                            LOG.debug("Tracking frame lidar=%s objects=%s valid=%s tracks=%d events=%d queue_depth=%d queue_wait_ms=%.2f processing_ms=%.2f",
+                                      self.engine.config.get("name", "Unnamed LiDAR"), self.engine.raw_in_last_message,
                                       self.engine.valid_in_last_message, len(self.engine.tracks), event_count,
                                       self.pending.qsize(), queue_wait_ms, processing_ms)
             finally:

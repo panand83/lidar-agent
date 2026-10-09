@@ -14,7 +14,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 from engine import LidarEngine
@@ -31,6 +31,12 @@ PROCESSORS = {}
 INTEGRATIONS = IntegrationService(start_workers=False, cache_path=DATA.parent / "integrations-cache.json")
 LOG = logging.getLogger(__name__)
 CLIENT_INSTANCE_ID = uuid4().hex[:8]
+
+
+def lidar_name(lidar_id):
+    with LOCK:
+        engine = ENGINES.get(lidar_id)
+        return (engine.config.get("name") or "Unnamed LiDAR") if engine else "Unnamed LiDAR"
 
 
 def mqtt_client_id(lidar_id):
@@ -57,7 +63,7 @@ def log_max_bytes():
 
 
 def configure_logging():
-    level_name = os.environ.get("KLA_LOG_LEVEL", "DEBUG").upper()
+    level_name = os.environ.get("KLA_LOG_LEVEL", "INFO").upper()
     if level_name not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
         raise ValueError("KLA_LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
     handlers = [logging.StreamHandler()]
@@ -70,8 +76,9 @@ def configure_logging():
             maxBytes=log_max_bytes(),
             backupCount=int(os.environ.get("KLA_LOG_BACKUP_COUNT", "5")),
             encoding="utf-8"))
-    logging.basicConfig(level=getattr(logging, level_name), format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-                        handlers=handlers, force=True)
+    logging.basicConfig(level=getattr(logging, level_name),
+                        format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S", handlers=handlers, force=True)
     LOG.info("Logging initialized level=%s file=%s", level_name,
              str(Path(log_dir) / "kyra-lidar-agent.log") if log_dir else "disabled")
 
@@ -144,6 +151,50 @@ def save(lidar_id):
     write_config(lidar_file(lidar_id), ENGINES[lidar_id].config)
 
 
+def restore_lidar_config(backup, replace=False):
+    if not isinstance(backup, dict):
+        raise ValueError("Backup must contain one LiDAR configuration object")
+    if not isinstance(replace, bool):
+        raise ValueError("Replace must be true or false")
+    if not isinstance(backup.get("mqtt"), dict) or not isinstance(backup.get("regions"), list) or \
+            not isinstance(backup.get("rules"), list) or not isinstance(backup.get("map_alignment"), dict):
+        raise ValueError("Backup is missing LiDAR settings, geometry, rules, or map alignment")
+    config = copy.deepcopy(backup)
+    config["name"] = str(config.get("name") or config.get("id") or "")
+    defaults = default_lidar(str(config.get("id", "")))
+    config.setdefault("integrations", copy.deepcopy(defaults["integrations"]))
+    try:
+        validate(config)
+    except (AttributeError, IndexError) as exc:
+        raise ValueError("Invalid LiDAR backup structure") from exc
+    lidar_id = config["id"]
+    with LOCK:
+        existing_id = next((key for key in ENGINES if key.casefold() == lidar_id.casefold()), None)
+        if existing_id and existing_id != lidar_id:
+            raise ValueError("LiDAR ID conflicts with an existing agent; use its exact ID or choose a new ID")
+        if existing_id and not replace:
+            raise ValueError("LiDAR ID already exists; choose a new ID or explicitly replace the agent")
+        if not existing_id and replace:
+            raise ValueError("Cannot replace a LiDAR agent that does not exist")
+        target = lidar_file(lidar_id)
+        if not existing_id and target.exists():
+            raise ValueError("A configuration file already exists for this LiDAR ID")
+        write_config(target, config)
+        if existing_id:
+            processor = PROCESSORS[lidar_id]
+            INTEGRATIONS.cancel(lidar_id)
+            processor.reset()
+            with processor.lock:
+                processor.engine.reconfigure(config)
+        else:
+            engine = LidarEngine(config)
+            ENGINES[lidar_id] = engine
+            PROCESSORS[lidar_id] = new_processor(engine)
+    connect(lidar_id)
+    LOG.info("LiDAR configuration restored lidar=%s action=%s", lidar_name(lidar_id), "replace" if replace else "create")
+    return lidar_id
+
+
 def set_lidar_enabled(lidar_id, enabled):
     if not isinstance(enabled, bool):
         raise ValueError("Enabled must be true or false")
@@ -162,7 +213,7 @@ def set_lidar_enabled(lidar_id, enabled):
         connect(lidar_id)
     else:
         disconnect(lidar_id)
-    LOG.info("LiDAR %s %s", lidar_id, "enabled" if enabled else "disabled")
+    LOG.info("LiDAR %s %s", lidar_name(lidar_id), "enabled" if enabled else "disabled")
 
 
 def validate(config, existing=None):
@@ -222,6 +273,9 @@ def validate(config, existing=None):
             area = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(points, points[1:] + points[:1]))
             if abs(area) < 1e-6:
                 raise ValueError("A zone needs a nonzero area")
+            tolerance = float(region.get("boundary_tolerance_m", 0))
+            if not math.isfinite(tolerance) or tolerance < 0:
+                raise ValueError("boundary_tolerance_m must be nonnegative")
     rule_ids = set()
     for rule in config.get("rules", []):
         if not rule.get("id") or rule["id"] in rule_ids:
@@ -313,20 +367,22 @@ def process_tracking(engine, payload, client):
     mapped_ids = {mapping.get("rule_id") for mapping in mappings if mapping.get("enabled")}
     config = copy.deepcopy(engine.config) if any(event.get("rule_id") in mapped_ids for event in emitted) else None
     qos = int(engine.config["mqtt"].get("qos", 1))
+    header = payload.get("header", {}) if isinstance(payload, dict) else {}
+    frame_id = str(header.get("frame_id", "")) if isinstance(header, dict) else ""
     for event in emitted:
         if config and event.get("rule_id") in mapped_ids:
             try:
-                INTEGRATIONS.dispatch(engine.config["id"], config, event, client)
+                key = (frame_id, str(event.get("sensor_id", "")), str(event.get("track_id", "")))
+                track = getattr(engine, "tracks", {}).get(key)
+                started_at = track["first_time"] if track else event.get("timestamp")
+                INTEGRATIONS.dispatch(engine.config["id"], config, event, client, started_at)
             except Exception as exc:
                 INTEGRATIONS.report_error(engine.config["id"], exc)
         result = client.publish("events", json.dumps(event), qos=qos)
-        details = (engine.config["id"], event.get("event_id"), event.get("rule_id"),
-                   event.get("event_type"), event.get("track_id"))
-        if getattr(result, "rc", 0) == 0:
-            LOG.info("Event publish queued lidar=%s event=%s rule=%s type=%s track=%s", *details)
-        else:
-            LOG.warning("Event publish rejected lidar=%s event=%s rule=%s type=%s track=%s rc=%s",
-                        *details, result.rc)
+        if getattr(result, "rc", 0) != 0:
+            LOG.warning("Event publish rejected rule_name=%s lidar=%s type=%s rc=%s",
+                        event.get("rule_name", "Unnamed rule"), engine.config.get("name", "Unnamed LiDAR"),
+                        event.get("event_type"), result.rc)
     return len(emitted)
 
 
@@ -351,21 +407,20 @@ def on_message(lidar_id, client, userdata, message):
             tracking_topic = engine.config["mqtt"].get("topic")
             source = engine.config.get("source", "Flasheye")
             sensor_filter = engine.config.get("sensor_id", "")
+            name = engine.config.get("name", "Unnamed LiDAR")
             with processor.admission_lock:
                 generation = processor.generation
         if message.topic == rule_topic:
-            INTEGRATIONS.ingest(lidar_id, "rule", payload)
-            LOG.debug("Rule configuration received lidar=%s", lidar_id)
+            INTEGRATIONS.ingest(lidar_id, "rule", payload, name)
         elif message.topic == rse_topic:
-            INTEGRATIONS.ingest(lidar_id, "rse", payload)
-            LOG.debug("RSE configuration received lidar=%s", lidar_id)
+            INTEGRATIONS.ingest(lidar_id, "rse", payload, name)
         elif message.topic == tracking_topic:
             if accepts_tracking(source, payload, sensor_filter):
                 processor.enqueue(payload, client, expected_generation=generation)
             else:
                 processor.record_filtered(source, payload, sensor_filter)
     except Exception as exc:
-        LOG.warning("MQTT message failed lidar=%s topic=%s error=%s", lidar_id, message.topic, exc)
+        LOG.warning("MQTT message failed lidar=%s topic=%s error=%s", lidar_name(lidar_id), message.topic, exc)
         with LOCK:
             processor = PROCESSORS.get(lidar_id)
         if processor:
@@ -380,13 +435,14 @@ def connect(lidar_id):
         if not engine or not engine.config.get("enabled", True):
             return
         settings = copy.deepcopy(engine.config["mqtt"])
+        name = engine.config.get("name", "Unnamed LiDAR")
         engine.mqtt_status = "connecting"
         engine.error = None
     try:
         import paho.mqtt.client as mqtt
         client_id = mqtt_client_id(lidar_id)
-        LOG.info("MQTT connecting lidar=%s host=%s port=%s topic=%s client_id=%s", lidar_id,
-                 settings["host"], settings["port"], settings["topic"], client_id)
+        LOG.info("MQTT connecting lidar=%s host=%s port=%s topic=%s", name,
+                 settings["host"], settings["port"], settings["topic"])
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
         username = settings.get("username") or os.environ.get("MQTT_USER", "")
         password = settings.get("password") or os.environ.get("MQTT_PASSWORD", "")
@@ -395,9 +451,9 @@ def connect(lidar_id):
         client.on_message = lambda c, u, m: on_message(lidar_id, c, u, m)
         def on_connect(c, u, flags, reason, properties):
             if reason == 0:
-                LOG.info("MQTT connected lidar=%s topic=%s", lidar_id, settings["topic"])
+                LOG.info("MQTT connected lidar=%s topic=%s", name, settings["topic"])
             else:
-                LOG.warning("MQTT rejected lidar=%s reason=%s", lidar_id, reason)
+                LOG.warning("MQTT rejected lidar=%s reason=%s", name, reason)
             with LOCK:
                 if lidar_id in ENGINES:
                     ENGINES[lidar_id].mqtt_status = "subscribed" if reason == 0 else "rejected"
@@ -410,14 +466,14 @@ def connect(lidar_id):
                     if config_topic and config_topic != settings["topic"]:
                         c.subscribe(config_topic, qos=int(settings.get("qos", 1)))
         def on_connect_fail(c, u):
-            LOG.warning("MQTT connect failed lidar=%s host=%s port=%s", lidar_id, settings["host"], settings["port"])
+            LOG.warning("MQTT connect failed lidar=%s host=%s port=%s", name, settings["host"], settings["port"])
             with LOCK:
                 if lidar_id in ENGINES:
                     ENGINES[lidar_id].mqtt_status = "connect_failed"
                     ENGINES[lidar_id].error = f"MQTT connect failed: {settings['host']}:{settings['port']}"
         def on_disconnect(c, u, flags, reason, properties):
             if reason != 0:
-                LOG.warning("MQTT disconnected lidar=%s reason=%s", lidar_id, reason)
+                LOG.warning("MQTT disconnected lidar=%s reason=%s", name, reason)
             with LOCK:
                 if lidar_id in ENGINES and reason != 0:
                     ENGINES[lidar_id].mqtt_status = "disconnected"
@@ -433,7 +489,7 @@ def connect(lidar_id):
         if processor:
             processor.activate()
     except Exception as exc:
-        LOG.exception("MQTT setup failed lidar=%s", lidar_id)
+        LOG.exception("MQTT setup failed lidar=%s", name)
         with LOCK:
             ENGINES[lidar_id].error = f"MQTT connection error: {exc}"
 
@@ -447,7 +503,7 @@ def disconnect(lidar_id):
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        LOG.debug("HTTP %s - %s", self.address_string(), format % args)
+        pass
 
     def send_json(self, data, status=200):
         body = json.dumps(data).encode("utf-8")
@@ -472,9 +528,31 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         parts = path.strip("/").split("/")
+        if len(parts) == 4 and parts[:2] == ["api", "lidars"] and parts[3] == "backup":
+            lidar_id = unquote(parts[2])
+            with LOCK:
+                if lidar_id not in ENGINES:
+                    return self.send_json({"error": "LiDAR not found"}, 404)
+                backup_path = lidar_file(lidar_id)
+                if not backup_path.exists():
+                    return self.send_json({"error": "Saved LiDAR configuration not found"}, 404)
+                try:
+                    body = backup_path.read_bytes()
+                except OSError:
+                    LOG.exception("Could not read LiDAR backup lidar=%s", lidar_name(lidar_id))
+                    return self.send_json({"error": "Could not read saved LiDAR configuration"}, 500)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{lidar_id}.json"')
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         with LOCK:
             agents = list(PROCESSORS.values()) if path == "/api/lidars" else None
             processor = PROCESSORS.get(parts[2]) if len(parts) == 3 and parts[:2] == ["api", "lidars"] else None
+            live_processor = PROCESSORS.get(parts[2]) if len(parts) == 4 and parts[:2] == ["api", "lidars"] and parts[3] == "live" else None
         if agents is not None:
             result = []
             for agent in agents:
@@ -487,6 +565,11 @@ class Handler(BaseHTTPRequestHandler):
                     result.append({"id": engine.config["id"], "name": engine.config["name"],
                                    "enabled": engine.config.get("enabled", True), "status": status})
             return self.send_json(result)
+        if live_processor:
+            after_event_id = parse_qs(urlparse(self.path).query).get("after", [None])[0]
+            with live_processor.lock:
+                live = live_processor.engine.live_snapshot(after_event_id)
+            return self.send_json(live)
         if processor:
             with processor.lock:
                 snapshot = processor.engine.snapshot()
@@ -505,6 +588,11 @@ class Handler(BaseHTTPRequestHandler):
             if size > 5_000_000:
                 return self.send_json({"error": "Payload too large"}, 413)
             data = json.loads(self.rfile.read(size)) if size else {}
+            if path == ["api", "lidars", "restore"]:
+                if not isinstance(data, dict):
+                    raise ValueError("Restore request must be an object")
+                lidar_id = restore_lidar_config(data.get("config"), data.get("replace", False))
+                return self.send_json({"ok": True, "id": lidar_id}, 200 if data.get("replace") else 201)
             if path == ["api", "lidars"]:
                 config = validate(default_lidar(str(data["id"])))
                 config["name"] = str(data.get("name") or config["id"])
@@ -538,7 +626,7 @@ class Handler(BaseHTTPRequestHandler):
                 set_lidar_enabled(lidar_id, data.get("enabled"))
                 return self.send_json({"ok": True, "enabled": data["enabled"]})
             if len(path) == 5 and path[3] == "integration-config" and path[4] in ("rule", "rse"):
-                INTEGRATIONS.ingest(lidar_id, path[4], data)
+                INTEGRATIONS.ingest(lidar_id, path[4], data, lidar_name(lidar_id))
                 return self.send_json({"ok": True, "catalog": INTEGRATIONS.snapshot(lidar_id)})
             if len(path) == 4 and path[3] == "integration-refresh":
                 with LOCK:
@@ -573,6 +661,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "Not found"}, 404)
         except (ValueError, TypeError, KeyError) as exc:
             self.send_json({"error": str(exc)}, 400)
+        except OSError:
+            LOG.exception("Could not save LiDAR configuration")
+            self.send_json({"error": "Could not write LiDAR configuration; check mounted volume permissions"}, 500)
 
     def do_DELETE(self):
         path = urlparse(self.path).path.strip("/").split("/")

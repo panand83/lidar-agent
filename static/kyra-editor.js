@@ -64,6 +64,28 @@ function createEditorModal(kind, title, contentId) {
   heading.id = `${kind}EditorTitle`;
   heading.textContent = title;
   box.setAttribute('aria-labelledby', heading.id);
+  heading.title = 'Drag to move';
+  let drag = null;
+  function positionBox(x, y) {
+    const maxX = Math.max(0, (window.innerWidth - box.offsetWidth) / 2 - 12);
+    const maxY = Math.max(0, (window.innerHeight - box.offsetHeight) / 2 - 12);
+    box.dataset.dragX = Math.max(-maxX, Math.min(maxX, x));
+    box.dataset.dragY = Math.max(-maxY, Math.min(maxY, y));
+    box.style.transform = `translate(${box.dataset.dragX}px, ${box.dataset.dragY}px)`;
+  }
+  heading.addEventListener('pointerdown', event => {
+    if (event.button !== 0) return;
+    drag = {x: event.clientX, y: event.clientY,
+      offsetX: Number(box.dataset.dragX || 0), offsetY: Number(box.dataset.dragY || 0)};
+    heading.setPointerCapture(event.pointerId);
+  });
+  heading.addEventListener('pointermove', event => {
+    if (!drag) return;
+    positionBox(drag.offsetX + event.clientX - drag.x, drag.offsetY + event.clientY - drag.y);
+  });
+  heading.addEventListener('pointerup', () => { drag = null; });
+  heading.addEventListener('pointercancel', () => { drag = null; });
+  window.addEventListener('resize', () => positionBox(Number(box.dataset.dragX || 0), Number(box.dataset.dragY || 0)));
   const actions = document.createElement('div');
   actions.className = 'editorModalActions';
   const close = document.createElement('button');
@@ -91,6 +113,7 @@ function createEditorModal(kind, title, contentId) {
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   };
   document.body.append(backdrop);
+  backdrop.positionBox = positionBox;
   return backdrop;
 }
 const geometryEditModal = createEditorModal('geometry', 'Edit Geometry', 'geometryEdit');
@@ -98,9 +121,92 @@ const ruleEditModal = createEditorModal('rule', 'Edit Rule', 'ruleEdit');
 ruleEditModal.querySelector('.editorModalBox').classList.add('ruleEditorModalBox');
 $('ruleEdit').classList.add('ruleFormGrid');
 $('ruleClassChoices').closest('label').classList.add('ruleFullWidth');
+const toleranceLabel = document.createElement('label');
+toleranceLabel.id = 'toleranceLabel';
+toleranceLabel.textContent = 'Zone boundary tolerance (m)';
+const toleranceInput = document.createElement('input');
+toleranceInput.id = 'zoneTolerance';
+toleranceInput.type = 'number';
+toleranceInput.min = '0';
+toleranceInput.step = '0.05';
+toleranceInput.value = '0';
+toleranceInput.onchange = () => {
+  const region = selectedRegion();
+  if (!region || region.type !== 'polygon') return;
+  region.boundary_tolerance_m = Number(toleranceInput.value);
+  dirty();
+};
+toleranceLabel.append(toleranceInput);
+$('geometryEdit').insertBefore(toleranceLabel, $('reverseArrow'));
+
+const editorTooltips = {
+  geometryName: 'Name shown in the geometry list and rule selectors.',
+  geometryType: 'Line or polygon, chosen when this geometry was drawn.',
+  lineDirection: 'Sets which side is forward for a crossing line. Reverse the arrow to change it.',
+  padding: 'Extends each end of the crossing line by this distance when testing crossings.',
+  sensitivity: 'A track must move this far beyond the line to register a crossing.',
+  zoneTolerance: 'Ignore position changes close to the zone edge until the object moves this far past it. Zero disables tolerance.',
+  ruleType: 'Choose line crossing, zone transition, or occupancy.',
+  ruleName: 'Name used in the rule list and generated events.',
+  ruleEnabled: 'Enable or disable this rule without deleting it.',
+  ruleClassChoices: 'Only selected object classes are eligible for this rule.',
+  ruleRegion: 'Polygon whose boundary or occupancy this rule evaluates.',
+  ruleLine1: 'First crossing line; required for a line rule.',
+  ruleLine2: 'Optional second line for a multi-line rule.',
+  ruleLine3: 'Optional third line for a multi-line rule.',
+  triggerMode: 'Any emits on a tagged line; Sequence emits only after lines are crossed in order.',
+  ruleDirection: 'Enter, Leave, or Both; Both emits once after the same track enters and leaves.',
+  headingEnabled: 'Require the track heading to fall within the configured angle range.',
+  headingTool: 'Adjust the allowed heading direction on the map.',
+  headingCenter: 'Compass direction at the center of the allowed heading range.',
+  headingDeviation: 'Allowed angle on either side of the heading center.',
+  minSpeed: 'Minimum estimated track speed required to trigger this rule.',
+  minAge: 'Minimum time the object must have been tracked before the rule can trigger.',
+  debounce: 'Minimum time between events from this rule for the same track.',
+  occupancyInterval: 'Maximum time between occupancy count publications, even if the count stays the same.',
+};
+const editorHelpTooltip = document.createElement('div');
+editorHelpTooltip.className = 'editorHelpTooltip';
+editorHelpTooltip.id = 'editorHelpTooltip';
+editorHelpTooltip.setAttribute('role', 'tooltip');
+editorHelpTooltip.hidden = true;
+document.body.append(editorHelpTooltip);
+function showEditorHelp(icon) {
+  editorHelpTooltip.textContent = icon.dataset.tip;
+  editorHelpTooltip.hidden = false;
+  const bounds = icon.getBoundingClientRect();
+  const width = editorHelpTooltip.offsetWidth;
+  const height = editorHelpTooltip.offsetHeight;
+  editorHelpTooltip.style.left = `${Math.max(10, Math.min(bounds.left, window.innerWidth - width - 10))}px`;
+  editorHelpTooltip.style.top = `${bounds.bottom + height + 8 < window.innerHeight ? bounds.bottom + 8 : bounds.top - height - 8}px`;
+}
+function hideEditorHelp() { editorHelpTooltip.hidden = true; }
+document.addEventListener('scroll', hideEditorHelp, true);
+for (const [id, description] of Object.entries(editorTooltips)) {
+  const control = $(id);
+  const label = control.closest('label');
+  const icon = document.createElement('span');
+  icon.className = 'fieldInfo';
+  icon.textContent = 'i';
+  icon.tabIndex = 0;
+  icon.setAttribute('role', 'note');
+  icon.setAttribute('aria-label', description);
+  icon.setAttribute('aria-describedby', editorHelpTooltip.id);
+  icon.dataset.tip = description;
+  icon.onmouseenter = icon.onfocus = () => showEditorHelp(icon);
+  icon.onmouseleave = icon.onblur = hideEditorHelp;
+  icon.onclick = event => { event.preventDefault(); event.stopPropagation(); icon.focus(); };
+  if (label && (id === 'ruleEnabled' || id === 'headingEnabled')) label.append(icon);
+  else if (label) label.insertBefore(icon, control);
+  else control.after(icon);
+}
+$('headingTool').parentElement.classList.add('headingToolRow');
 
 function openEditorModal(kind, id) {
   editorModalFocus[kind] = document.activeElement;
+  if (kind === 'rule' && state.mode === 'heading' && state.selectedRule !== id) mode('selectTool');
+  const modal = kind === 'geometry' ? geometryEditModal : ruleEditModal;
+  modal.positionBox(0, 0);
   if (kind === 'geometry') {
     state.selectedRegion = id;
     state.geometryEditorOpen = true;
@@ -113,8 +219,12 @@ function openEditorModal(kind, id) {
 }
 
 function closeEditorModal(kind) {
+  hideEditorHelp();
   if (kind === 'geometry') state.geometryEditorOpen = false;
-  else state.ruleEditorOpen = false;
+  else {
+    state.ruleEditorOpen = false;
+    if (state.mode === 'heading') mode('selectTool');
+  }
   renderFields();
   const target = editorModalFocus[kind];
   (target?.isConnected ? target : $(kind === 'geometry' ? 'newGeometry' : 'addRule')).focus();
@@ -212,6 +322,8 @@ renderGeometryList = function () {
   $('lineDirection').value = region.line_direction || 'forward';
   $('sensitivity').value = region.crossing_sensitivity_m ?? .35;
   $('padding').value = region.endpoint_padding_m ?? 0;
+  toleranceInput.value = region.boundary_tolerance_m ?? 0;
+  toleranceLabel.hidden = region.type !== 'polygon';
   for (const id of ['directionLabel', 'sensitivityLabel', 'paddingLabel', 'reverseArrow']) {
     $(id).hidden = region.type !== 'line';
   }
@@ -347,6 +459,7 @@ renderRuleList = function () {
   const rule = selectedRule();
   const editorOpen = !!rule && state.ruleEditorOpen;
   ruleEditModal.hidden = !editorOpen;
+  ruleEditModal.classList.toggle('headingActive', editorOpen && state.mode === 'heading');
   $('ruleEdit').hidden = !editorOpen;
   if (!rule) return;
   $('ruleName').value = rule.name;
@@ -384,6 +497,7 @@ renderRuleList = function () {
   $('headingTool').parentElement.hidden = !trackFiltersVisible || !rule.heading_enabled;
   $('headingTool').disabled = !trackFiltersVisible || !rule.heading_enabled;
   $('headingTool').classList.toggle('active', state.mode === 'heading' && trackFiltersVisible);
+  $('headingTool').textContent = state.mode === 'heading' ? 'Done Adjusting' : 'Adjust Heading';
   const assigned = rule.type === 'line_crossing' ? ids.length > 0 : !!rule.region_id;
   $('ruleEdit').dataset.warning = invalidDirection ? 'This direction cannot trigger this rule. Choose a supported direction and save.' :
     assigned ? '' : 'Assign geometry before this rule can generate events';
@@ -443,6 +557,7 @@ for (const id of ['ruleLine1', 'ruleLine2', 'ruleLine3']) $(id).onchange = updat
 $('ruleType').addEventListener('change', () => {
   const rule = selectedRule();
   if (!rule) return;
+  if (rule.type === 'occupancy' && state.mode === 'heading') mode('selectTool');
   const lineOnly = ['line_region_ids', 'line_trigger_mode'];
   const trackOnly = ['direction_mode', 'heading_enabled', 'heading_center_deg',
     'heading_deviation_deg', 'heading_anchor', 'min_speed_mps', 'min_track_age_ms', 'debounce_ms'];
@@ -472,19 +587,22 @@ for (const [id, key] of [['headingEnabled', 'heading_enabled'], ['headingCenter'
     const rule = selectedRule();
     if (!rule) return;
     rule[key] = id === 'headingEnabled' ? $(id).checked : Number($(id).value);
+    if (id === 'headingEnabled' && !rule.heading_enabled && state.mode === 'heading') mode('selectTool');
     dirty();
     renderFields();
   };
 }
 
-$('headingTool').textContent = 'Adjust Heading';
 $('headingTool').onclick = () => {
   if (!selectedRule()?.heading_enabled || selectedRule()?.type === 'occupancy') return;
   const headingMode = state.mode !== 'heading';
-  state.ruleEditorOpen = false;
   mode(headingMode ? 'heading' : 'selectTool');
   renderFields();
-  if (headingMode) message('Adjust heading on the map, then save the rule');
+  if (headingMode) {
+    const box = ruleEditModal.querySelector('.editorModalBox');
+    const room = (window.innerWidth - box.offsetWidth) / 2 - 12;
+    ruleEditModal.positionBox(Math.min(room, 260), 0);
+  }
 };
 function headingAnchor(rule) {
   if (Array.isArray(rule.heading_anchor) && rule.heading_anchor.length === 2 &&
@@ -646,7 +764,7 @@ finishDraft = function () {
       line_direction: 'forward', endpoint_padding_m: 0, crossing_sensitivity_m: .35};
   } else if (!region && state.mode === 'drawPolygon' && points.length >= 3) {
     region = {id: uid('zone'), name: `Zone ${state.config.regions.filter(item => item.type === 'polygon').length + 1}`,
-      type: 'polygon', points};
+      type: 'polygon', points, boundary_tolerance_m: 0};
   }
   if (region && !validReplacement) {
     state.config.regions.push(region);
@@ -667,6 +785,7 @@ finishDraft = function () {
 };
 
 setTab = function (tab) {
+  if (tab !== 'rules' && state.mode === 'heading') closeEditorModal('rule');
   kyraSetTab(tab);
   if (tab === 'scene') {
     $('scenePanel').hidden = true;
@@ -676,16 +795,46 @@ setTab = function (tab) {
 
 mode = function (name) {
   if (name !== 'drawLine' && name !== 'drawPolygon') state.redrawingRegion = null;
+  state.draftPreview = null;
   kyraMode(name);
   canvas.style.pointerEvents = currentGeo() && name === 'pan' ? 'none' : 'auto';
   canvas.classList.toggle('editing', name === 'selectTool');
   $('selectTool').classList.toggle('active', name === 'selectTool');
+  ruleEditModal.classList.toggle('headingActive', name === 'heading' && state.ruleEditorOpen);
+  $('headingTool').classList.toggle('active', name === 'heading');
+  $('headingTool').textContent = name === 'heading' ? 'Done Adjusting' : 'Adjust Heading';
   renderDrawActions();
 };
 $('selectTool').onclick = () => mode('selectTool');
 
 renderCanvas = function () {
   kyraCanvasRender();
+  if ((state.mode === 'drawLine' || state.mode === 'drawPolygon') && state.draft.length) {
+    const ratio = devicePixelRatio || 1;
+    if (state.draftPreview) {
+      const from = screen(state.draft[state.draft.length - 1]);
+      const to = screen(state.draftPreview);
+      ctx.save();
+      ctx.strokeStyle = '#ffd54f';
+      ctx.lineWidth = 2 * ratio;
+      ctx.setLineDash([6 * ratio, 5 * ratio]);
+      ctx.beginPath(); ctx.moveTo(...from); ctx.lineTo(...to); ctx.stroke();
+      ctx.restore();
+    }
+    state.draft.forEach((point, index) => {
+      const pixel = screen(point);
+      ctx.beginPath();
+      ctx.arc(pixel[0], pixel[1], 6 * ratio, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffd54f';
+      ctx.fill();
+      ctx.lineWidth = 2 * ratio;
+      ctx.strokeStyle = '#07112d';
+      ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.font = `${11 * ratio}px Segoe UI, Arial, sans-serif`;
+      ctx.fillText(String(index + 1), pixel[0] + 9 * ratio, pixel[1] - 9 * ratio);
+    });
+  }
   if (selectedRule()?.heading_enabled && selectedRule()?.type !== 'occupancy' && state.tab === 'rules' && state.mode === 'heading') {
     const rule = selectedRule();
     const {center, radius, hub, ratio, visualHeading} = headingEditorGeometry(rule);
@@ -733,6 +882,16 @@ renderCanvas = function () {
     ctx.restore();
   }
 };
+canvas.addEventListener('pointermove', event => {
+  if (state.mode !== 'drawLine' && state.mode !== 'drawPolygon') return;
+  state.draftPreview = world(pointer(event));
+  if (state.draft.length) renderCanvas();
+});
+canvas.addEventListener('pointerleave', () => {
+  if (!state.draftPreview) return;
+  state.draftPreview = null;
+  if (state.draft.length) renderCanvas();
+});
 
 function pointSegmentDistance(point, start, end) {
   const vx = end[0] - start[0], vy = end[1] - start[1];
@@ -751,12 +910,8 @@ canvas.addEventListener('click', event => {
     for (let index = 0; index < length; index++) {
       if (pointSegmentDistance(location, points[index], points[(index + 1) % points.length]) < 12 * (devicePixelRatio || 1)) {
         state.selectedRegion = region.id;
-        const rule = selectedRule();
-        if (rule && region.type === 'polygon' && rule.type !== 'line_crossing') {
-          rule.region_id = region.id;
-          dirty();
-        }
-        openEditorModal('geometry', region.id);
+        state.geometryEditorOpen = false;
+        renderFields();
         return;
       }
     }
