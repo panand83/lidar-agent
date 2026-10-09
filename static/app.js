@@ -45,7 +45,7 @@ function drawTrackMarker(track, point) {
   if (image?.complete && image.naturalWidth) {
     ctx.save();
     ctx.translate(point[0], point[1]);
-    if (kind === 'car') {
+    if (kind === 'car' || kind === 'person' || kind === 'human') {
       const key = JSON.stringify([state.id, track.frame, track.sensor, track.id]);
       const points = track.points || [];
       if (points.length < 2) markerDirections.delete(key);
@@ -59,7 +59,7 @@ function drawTrackMarker(track, point) {
       const motion = markerDirections.get(key);
       if (motion) {
         const ahead = screen([track.x + motion.dx, track.y + motion.dy]);
-        ctx.rotate(Math.atan2(ahead[1] - point[1], ahead[0] - point[0]) + Math.PI / 2);
+        ctx.rotate(Math.atan2(ahead[1] - point[1], ahead[0] - point[0]) + (kind === 'car' ? Math.PI / 2 : 0));
       }
       if (markerDirections.size > 500) {
         const expired = Date.now() - 10000;
