@@ -21,7 +21,7 @@ const context = vm.createContext({Image: TestImage, ctx, devicePixelRatio: 1,
   screen: point => [point[0], -point[1]]});
 vm.runInContext(source.slice(start, end), context);
 assert.equal(vm.runInContext('markerSvgs.car.includes("#1677FF")', context), true);
-assert.equal(vm.runInContext('markerSvgs.human.includes("#EF4444")', context), true);
+assert.equal(vm.runInContext('markerSvgs.human.includes("Red walking person top view")', context), true);
 
 const draw = track => {
   calls.length = 0;
@@ -37,12 +37,12 @@ assert.deepEqual(carCalls.find(call => call[0] === 'drawImage').slice(2), [-10, 
 assert.ok(Math.abs(draw({...car, points: [[1, 0], [1, 0]]}).find(call => call[0] === 'rotate')[1] - Math.PI / 2) < 1e-6);
 
 const humanCalls = draw({...car, class: 'human'});
-assert.equal(humanCalls.find(call => call[0] === 'rotate')[1], 0);
+assert.ok(Math.abs(humanCalls.find(call => call[0] === 'rotate')[1] - Math.PI / 2) < 1e-6);
 assert.deepEqual(humanCalls.find(call => call[0] === 'drawImage').slice(2), [-10, -10, 20, 20]);
 const northboundHuman = draw({...car, class: 'person', x: 0, y: 1, points: [[0, 0], [0, 1]]});
-assert.ok(Math.abs(northboundHuman.find(call => call[0] === 'rotate')[1] + Math.PI / 2) < 1e-6);
+assert.ok(Math.abs(northboundHuman.find(call => call[0] === 'rotate')[1]) < 1e-6);
 const westboundHuman = draw({...car, class: 'human', x: -1, y: 0, points: [[0, 0], [-1, 0]]});
-assert.ok(Math.abs(Math.abs(westboundHuman.find(call => call[0] === 'rotate')[1]) - Math.PI) < 1e-6);
+assert.ok(Math.abs(westboundHuman.find(call => call[0] === 'rotate')[1] - 3 * Math.PI / 2) < 1e-6);
 assert.ok(draw({...car, class: 'other'}).some(call => call[0] === 'arc'));
 assert.equal(ctx.fillStyle, '#4b5563');
 console.log('Map marker size and heading passed');

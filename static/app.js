@@ -16,19 +16,34 @@ const markerSvgs = {
   <path d="M23 143Q30 153 37 153L30 144 23 138Z M77 143Q70 153 63 153L70 144 77 138Z" fill="#003F9E"/>
   <path d="M28 75Q23 89 27 107M72 75Q77 89 73 107" stroke="#0758D4" stroke-width="3"/>
 </svg>`,
-  human: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 100 100">
-<path d="M45 12Q40 5 48 3Q54 -1 63 4Q72 1 72 6L68 12 70 18 66 22 60 22 57 27 51 24 50 18Z" fill="#40251f" stroke="#281713" stroke-width="1.5"/>
-<path d="M61 12L67 12 67 17 70 20 67 23 62 23 58 21 56 26 51 23 53 16Z" fill="#ffb77d" stroke="#e77a48" stroke-width="1.2"/>
-<path d="M49 24Q55 24 59 29L64 39 74 45 71 50 61 46 55 39 57 53 41 54 41 42 35 51 29 49 33 37 41 28Z" fill="#EF4444" stroke="#991B1B" stroke-width="2"/>
-<path d="M42 29Q47 25 51 27L46 47 42 50 42 39 34 49" fill="#F87171" opacity=".8"/>
-<path d="M57 32L63 43 72 47" fill="none" stroke="#DC2626" stroke-width="3"/>
-<path d="M30 49L28 54 31 58 35 57 35 53 34 50Z M73 47L77 46 81 49 79 53 75 53 71 50Z" fill="#ffbd87" stroke="#ee8856" stroke-width="1.3"/>
-<path d="M42 53L57 52 65 67 72 83 65 87 54 69 49 63 40 73 30 84 24 80 36 61Z" fill="#991B1B" stroke="#7F1D1D" stroke-width="2"/>
-<path d="M46 56L54 57 61 70 67 82" fill="none" stroke="#DC2626" stroke-width="4" opacity=".8"/>
-<path d="M39 64L30 77" fill="none" stroke="#DC2626" stroke-width="4" opacity=".7"/>
-<path d="M23 79L30 82 36 88 36 92 30 94 19 88 18 85Z M64 85L72 81 77 85 86 87 90 91 88 95 75 97 66 94Z" fill="#EF4444" stroke="#991B1B" stroke-width="2"/>
-<path d="M19 87L30 94 36 92 M66 94L75 97 88 95" fill="none" stroke="#fff" stroke-width="2.6"/>
-<path d="M26 85L31 88M71 86L76 88M74 84L79 86" stroke="#FEE2E2" stroke-width="1.7" stroke-linecap="round"/>
+  human: `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 100 140">
+<title>Red walking person top view</title>
+<!-- rear foot -->
+<path d="M54 76 Q64 73 66 84 L66 103 Q65 113 58 113 Q51 112 51 102 L50 84Z" fill="#d71920" stroke="#9b1015" stroke-width="2"/>
+<path d="M55 96 L63 96 M55 100 L63 100" stroke="white" stroke-width="2.3" stroke-linecap="round"/>
+<!-- legs -->
+<path d="M35 64 Q28 78 35 98 L40 116 Q44 123 52 118 L54 111 L50 88 L57 78 L64 88 L70 84 L68 69Z" fill="#a30e16" stroke="#790a12" stroke-width="2"/>
+<path d="M36 81 Q36 95 45 108 L49 109 L44 85Z" fill="#c91a22"/>
+<!-- forward foot -->
+<path d="M39 112 Q36 119 37 128 Q38 136 47 137 Q57 136 57 127 L54 113Z" fill="#f32831" stroke="#a80913" stroke-width="2"/>
+<path d="M40 128 Q47 135 54 127 M42 119 L51 119 M42 123 L51 123" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+<!-- arms and hands -->
+<path d="M26 38 Q13 41 12 59 Q12 70 19 72 Q27 73 30 64 L36 49Z" fill="#ef232c" stroke="#a90915" stroke-width="2"/>
+<path d="M14 67 Q9 71 12 78 Q17 85 24 79 Q28 74 24 68Z" fill="#ffb276" stroke="#f47742" stroke-width="2"/>
+<path d="M74 36 Q85 40 88 58 L89 80 Q89 88 81 89 Q73 88 73 80 L70 51Z" fill="#f32930" stroke="#a90915" stroke-width="2"/>
+<path d="M77 84 Q74 92 81 98 Q90 102 94 93 Q96 87 89 82Z" fill="#ffb276" stroke="#f47742" stroke-width="2"/>
+<!-- torso -->
+<path d="M28 36 Q36 28 49 30 Q65 27 74 37 L76 56 Q73 74 59 79 Q39 82 27 65 Q24 53 28 36Z" fill="#f4232d" stroke="#ad0913" stroke-width="2.5"/>
+<path d="M29 41 Q31 55 45 59 Q63 65 73 47 Q68 70 56 72 Q37 73 29 59Z" fill="#d90f19"/>
+<path d="M32 38 Q39 31 48 34 Q41 39 37 47Z M63 35 Q71 37 73 46 L67 51Z" fill="#ff5156"/>
+<!-- neck and ears -->
+<ellipse cx="31" cy="32" rx="6" ry="9" fill="#ffb978" stroke="#ee783f" stroke-width="1.5"/>
+<ellipse cx="69" cy="32" rx="6" ry="9" fill="#ffb978" stroke="#ee783f" stroke-width="1.5"/>
+<path d="M38 43 Q50 56 62 43 L61 34 L39 34Z" fill="#ffc18a"/>
+<!-- hair top -->
+<path d="M50 3 Q68 2 71 21 Q74 40 62 47 Q51 55 38 47 Q27 39 28 23 Q28 7 50 3Z" fill="#341b16" stroke="#210e0d" stroke-width="2.5"/>
+<path d="M35 25 Q36 9 54 9 Q63 10 66 20 Q54 12 43 22 Q37 30 38 38 Q31 35 35 25Z" fill="#63372c"/>
+<path d="M42 17 Q52 7 64 17 Q52 13 45 25Z" fill="#845041"/>
 </svg>`,
 };
 const markerImages = Object.fromEntries(Object.entries(markerSvgs).map(([name, svg]) => {
@@ -59,7 +74,7 @@ function drawTrackMarker(track, point) {
       const motion = markerDirections.get(key);
       if (motion) {
         const ahead = screen([track.x + motion.dx, track.y + motion.dy]);
-        ctx.rotate(Math.atan2(ahead[1] - point[1], ahead[0] - point[0]) + (kind === 'car' ? Math.PI / 2 : 0));
+        ctx.rotate(Math.atan2(ahead[1] - point[1], ahead[0] - point[0]) + Math.PI / 2);
       }
       if (markerDirections.size > 500) {
         const expired = Date.now() - 10000;
