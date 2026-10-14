@@ -204,7 +204,7 @@ function drawTrackId(track, point) {
   const label = String(track.id);
   ctx.font = `${12 * ratio}px Segoe UI, Arial, sans-serif`;
   const width = ctx.measureText(label).width + 8 * ratio;
-  const x = point[0] + (['car', 'human', 'person'].includes(track.class) ? 13 : 9) * ratio, y = point[1] - 17 * ratio;
+  const x = point[0] + (['car', 'human', 'person'].includes(track.class) ? 20 : 9) * ratio, y = point[1] - 17 * ratio;
   ctx.fillStyle = '#07112de6';
   ctx.fillRect(x, y, width, 19 * ratio);
   ctx.fillStyle = '#fff';

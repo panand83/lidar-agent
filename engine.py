@@ -85,11 +85,16 @@ class LidarEngine:
         self.error = None
         self.mqtt_status = "not_connected"
         self.occupancy = {}
+        self.stale_frames_dropped = 0
+        self.stale_samples_dropped = 0
+        self.unstamped_frames_ignored = 0
+        self.clock_resets = 0
+        self._rewind_last_timestamp = None
+        self._rewind_count = 0
 
     def reconfigure(self, config):
         self.config = config
-        self.tracks.clear()
-        self.occupancy.clear()
+        self.reset_tracks()
 
     def reset_events(self):
         self.events.clear()
@@ -97,6 +102,9 @@ class LidarEngine:
     def reset_tracks(self):
         self.tracks.clear()
         self.occupancy.clear()
+        self.last_message = None
+        self._rewind_last_timestamp = None
+        self._rewind_count = 0
 
     def xy_scale(self):
         geo = self.config.get("map_alignment", {}).get("geo")
@@ -361,17 +369,47 @@ class LidarEngine:
         self.messages += 1
         self.raw_in_last_message = tracking["raw_count"]
         self.valid_in_last_message = len(tracking["objects"])
-        self.last_message = timestamp
         self.last_received = time.time()
         emitted = []
         max_gap = float(self.config.get("max_gap_sec", 5))
         max_jump = float(self.config.get("max_jump_m", 25))
+        if timestamp <= 0:
+            self.unstamped_frames_ignored += 1
+            if tracking["objects"]:
+                LOG.warning("Tracking frame with objects has invalid source timestamp lidar=%s",
+                            self.config.get("name", "Unnamed LiDAR"))
+            return []
+        if self.last_message is not None and timestamp < self.last_message - max_gap:
+            self._rewind_count = (self._rewind_count + 1 if self._rewind_last_timestamp is not None
+                                  and timestamp > self._rewind_last_timestamp else 1)
+            self._rewind_last_timestamp = timestamp
+            if self._rewind_count >= 3:
+                LOG.warning("Source clock reset lidar=%s previous_timestamp=%.3f new_timestamp=%.3f; clearing tracks",
+                            self.config.get("name", "Unnamed LiDAR"), self.last_message, timestamp)
+                self.reset_tracks()
+                self.clock_resets += 1
+            else:
+                self.stale_frames_dropped += 1
+                if self.stale_frames_dropped == 1 or self.stale_frames_dropped % 100 == 0:
+                    LOG.warning("Out-of-order tracking frame ignored lidar=%s total=%d",
+                                self.config.get("name", "Unnamed LiDAR"), self.stale_frames_dropped)
+                return []
+        else:
+            self._rewind_count = 0
+            self._rewind_last_timestamp = None
+        self.last_message = max(self.last_message or timestamp, timestamp)
         for obj in tracking["objects"]:
             point, center = obj["point"], obj["center"]
             oid, sensor = obj["id"], obj["sensor"]
             key = (frame, sensor, oid)
             track = self.tracks.get(key)
-            if track is None or timestamp <= track["time"] or timestamp - track["time"] > max_gap or distance(point, track["pos"]) > max_jump * self.xy_scale():
+            if track is not None and timestamp <= track["time"]:
+                self.stale_samples_dropped += 1
+                if self.stale_samples_dropped == 1 or self.stale_samples_dropped % 100 == 0:
+                    LOG.warning("Duplicate tracking timestamp ignored lidar=%s total=%d",
+                                self.config.get("name", "Unnamed LiDAR"), self.stale_samples_dropped)
+                continue
+            if track is None or timestamp - track["time"] > max_gap or distance(point, track["pos"]) > max_jump * self.xy_scale():
                 self.tracks[key] = {"id": oid, "sensor": sensor, "frame": frame, "class": obj["class"], "pos": point, "center_pos": center, "time": timestamp, "first_time": timestamp, "history": deque([point], maxlen=2000), "samples": deque([(timestamp, point)], maxlen=6), "speed": 0.0, "heading": None, "line_sides": {}, "zone_sides": {}, "zone_entries": {}, "sequences": {}, "sequence_crossings": {}, "last_events": {}}
                 continue
             old = track["pos"]
@@ -391,16 +429,20 @@ class LidarEngine:
             track["history"].append(point)
             emitted.extend(self._evaluate(track, old, old_center, timestamp))
         for key, track in list(self.tracks.items()):
-            if timestamp - track["time"] > max_gap:
+            if self.last_message - track["time"] > max_gap:
                 del self.tracks[key]
-        emitted.extend(self._count_occupancy(timestamp))
+        emitted.extend(self._count_occupancy(self.last_message))
         return emitted
 
     def status(self):
         return {"messages": self.messages, "raw_in_last_message": self.raw_in_last_message,
                 "valid_in_last_message": self.valid_in_last_message, "last_message": self.last_message,
                 "last_received": self.last_received, "mqtt_status": self.mqtt_status,
-                "error": self.error, "tracks": len(self.tracks)}
+                "error": self.error, "tracks": len(self.tracks),
+                "stale_frames_dropped": self.stale_frames_dropped,
+                "stale_samples_dropped": self.stale_samples_dropped,
+                "unstamped_frames_ignored": self.unstamped_frames_ignored,
+                "clock_resets": self.clock_resets}
 
     def snapshot(self):
         return {"config": self.config, "status": self.status(), "tracks": [{"id": t["id"], "sensor": t["sensor"], "frame": t["frame"], "class": t["class"], "x": t["pos"][0], "y": t["pos"][1], "time": t["time"], "points": list(t["history"])} for t in self.tracks.values()], "events": list(self.events)}

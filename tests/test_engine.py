@@ -33,6 +33,76 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(line["lidar_id"], "lidar-a")
         self.assertTrue(line["sequence_complete"])
 
+    def test_duplicate_and_older_samples_preserve_pending_line_sequence(self):
+        settings = config("stale-sequence")
+        settings["rules"] = [settings["rules"][0]]
+        engine = LidarEngine(settings)
+        engine.process(frame(1, -2, 0))
+        engine.process(frame(2, 2, 0))
+        track = next(iter(engine.tracks.values()))
+        self.assertEqual(track["sequences"]["sequence"], 1)
+        self.assertEqual(engine.process(frame(2, 12, 0)), [])
+        self.assertEqual(engine.process(frame(1.5, 12, 0)), [])
+        self.assertIs(next(iter(engine.tracks.values())), track)
+        self.assertEqual(track["pos"], (2, 0))
+        self.assertEqual(track["sequences"]["sequence"], 1)
+        self.assertEqual(engine.status()["stale_samples_dropped"], 2)
+        self.assertEqual(engine.status()["stale_frames_dropped"], 0)
+        self.assertEqual(engine.status()["last_message"], 2)
+        events = engine.process(frame(3, 12, 0))
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]["sequence_complete"])
+
+    def test_untimed_empty_frame_does_not_reset_track_or_source_time(self):
+        settings = config("empty-frame")
+        settings["rules"] = [settings["rules"][0]]
+        engine = LidarEngine(settings)
+        engine.process(frame(1, -2, 0))
+        engine.process(frame(2, 2, 0))
+        self.assertEqual(engine.process({"header": {"frame_id": "f", "stamp": {"secs": 0, "nsecs": 0}},
+                                         "objects": []}), [])
+        self.assertEqual(engine.status()["last_message"], 2)
+        self.assertEqual(engine.status()["unstamped_frames_ignored"], 1)
+        self.assertEqual(len(engine.process(frame(3, 12, 0))), 1)
+
+    def test_mildly_late_frame_can_start_another_object_without_rewinding_status(self):
+        engine = LidarEngine(config("late-frame"))
+        engine.process(frame(10, -2, 0, oid=1))
+        engine.process(frame(9.95, 4, 0, oid=2))
+        self.assertEqual(engine.status()["last_message"], 10)
+        self.assertEqual(engine.status()["stale_frames_dropped"], 0)
+        self.assertEqual(len(engine.tracks), 2)
+
+    def test_sustained_source_clock_rewind_resynchronizes_once(self):
+        settings = config("clock-reset")
+        settings["rules"] = [settings["rules"][0]]
+        engine = LidarEngine(settings)
+        engine.process(frame(100, -2, 0))
+        engine.process(frame(101, 2, 0))
+        for timestamp in (80, 81):
+            self.assertEqual(engine.process(frame(timestamp, -2, 0)), [])
+            self.assertEqual(engine.status()["last_message"], 101)
+        self.assertEqual(engine.process(frame(82, -2, 0)), [])
+        self.assertEqual(engine.status()["clock_resets"], 1)
+        self.assertEqual(engine.status()["stale_frames_dropped"], 2)
+        track = next(iter(engine.tracks.values()))
+        self.assertEqual(track["first_time"], 82)
+        self.assertEqual(track["sequences"], {})
+        self.assertEqual(engine.process(frame(83, 2, 0)), [])
+        self.assertEqual(len(engine.process(frame(84, 12, 0))), 1)
+
+    def test_clock_rewind_candidate_clears_when_current_time_resumes(self):
+        engine = LidarEngine(config("clock-jitter"))
+        engine.process(frame(100, -2, 0))
+        engine.process(frame(101, -1, 0))
+        engine.process(frame(80, 10, 0))
+        engine.process(frame(81, 10, 0))
+        engine.process(frame(102, -1, 0))
+        engine.process(frame(82, 10, 0))
+        self.assertEqual(engine.status()["clock_resets"], 0)
+        self.assertEqual(engine.status()["last_message"], 102)
+        self.assertEqual(next(iter(engine.tracks.values()))["first_time"], 100)
+
     def test_exit_first_and_frame_filter(self):
         engine = LidarEngine(config("lidar-a"))
         engine.process(frame(1, 8, 0))

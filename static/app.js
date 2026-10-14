@@ -81,7 +81,7 @@ function drawTrackMarker(track, point) {
         for (const [id, value] of markerDirections) if (value.at < expired) markerDirections.delete(id);
       }
     }
-    const size = 20 * ratio;
+    const size = 24 * ratio;
     ctx.drawImage(image, -size / 2, -size / 2, size, size);
     ctx.restore();
     return;

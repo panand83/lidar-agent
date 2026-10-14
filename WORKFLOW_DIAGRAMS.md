@@ -19,7 +19,9 @@ flowchart TD
     FILTER -- Yes --> CAPACITY{"Per-LiDAR queue has capacity?"}
     CAPACITY -- No --> RESYNC["Drop pending backlog; resynchronize tracks"]
     CAPACITY -- Yes --> WORKER["Ordered worker for this LiDAR"]
-    WORKER --> ENGINE["Normalize objects; update track positions, speed, and heading"]
+    WORKER --> TIMING{"Usable source timestamp?"}
+    TIMING -- No --> UNSTAMPED["Ignore untimed frame; preserve tracks"]
+    TIMING -- Yes --> ENGINE["Normalize objects; skip stale samples; update tracks"]
     ENGINE --> RULES["Evaluate line and zone rules; evaluate occupancy separately"]
     RULES --> HAS_EVENT{"Event emitted?"}
     HAS_EVENT -- No --> NEXT["Wait for next frame"]
@@ -108,7 +110,7 @@ Polygon geometry has an optional `boundary_tolerance_m` (default 0). Each track 
 
 ## Timing And Persistence
 
-- Track identity is `(frame_id, sensor_id, object_id)`. A new track is created for a missing ID, non-increasing timestamp, gap over `max_gap_sec` (default 5 seconds), or position jump over `max_jump_m` (default 25 meters).
+- Track identity is `(frame_id, sensor_id, object_id)`. A new track is created for a missing ID, gap over `max_gap_sec` (default 5 seconds), or position jump over `max_jump_m` (default 25 meters). Duplicate or older samples for the same track are ignored without clearing its pending rules. Empty frames with zero source timestamps are ignored. Mildly late frames can still introduce other objects; a source clock rollback larger than the configured gap is resynchronized after three consecutive increasing timestamps in the new epoch. Status includes ignored-frame, stale-sample, and clock-reset counters.
 - The engine fallback debounce is 1,500 ms for line crossing and 2,000 ms for zone transition when a rule omits `debounce_ms`; configured rule values take precedence.
 - Recent events and active tracks are in memory. Per-LiDAR settings are persisted in `lidars/<id>.json`; the external Rule/RSE catalog is cached separately in `integrations-cache.json`.
 - Subalert mapping is optional and applies to line-crossing and zone-transition events. It requires an active external rule, a vehicle class, map alignment, position, and heading. Mapping debounce is per mapping across all objects.

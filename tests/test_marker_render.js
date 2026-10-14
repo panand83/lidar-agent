@@ -33,12 +33,12 @@ const car = {id: '7', frame: 'frame', sensor: '1', class: 'car', x: 1, y: 0,
   points: [[0, 0], [1, 0]]};
 const carCalls = draw(car);
 assert.ok(Math.abs(carCalls.find(call => call[0] === 'rotate')[1] - Math.PI / 2) < 1e-6);
-assert.deepEqual(carCalls.find(call => call[0] === 'drawImage').slice(2), [-10, -10, 20, 20]);
+assert.deepEqual(carCalls.find(call => call[0] === 'drawImage').slice(2), [-12, -12, 24, 24]);
 assert.ok(Math.abs(draw({...car, points: [[1, 0], [1, 0]]}).find(call => call[0] === 'rotate')[1] - Math.PI / 2) < 1e-6);
 
 const humanCalls = draw({...car, class: 'human'});
 assert.ok(Math.abs(humanCalls.find(call => call[0] === 'rotate')[1] - Math.PI / 2) < 1e-6);
-assert.deepEqual(humanCalls.find(call => call[0] === 'drawImage').slice(2), [-10, -10, 20, 20]);
+assert.deepEqual(humanCalls.find(call => call[0] === 'drawImage').slice(2), [-12, -12, 24, 24]);
 const northboundHuman = draw({...car, class: 'person', x: 0, y: 1, points: [[0, 0], [0, 1]]});
 assert.ok(Math.abs(northboundHuman.find(call => call[0] === 'rotate')[1]) < 1e-6);
 const westboundHuman = draw({...car, class: 'human', x: -1, y: 0, points: [[0, 0], [-1, 0]]});
