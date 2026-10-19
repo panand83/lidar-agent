@@ -7,7 +7,7 @@ from unittest.mock import patch
 import app
 from engine import LidarEngine
 from processing import LidarProcessor
-from sources import accepts_tracking
+from sources import accepts_tracking, filter_tracking
 
 
 class ProcessingTests(unittest.TestCase):
@@ -16,6 +16,20 @@ class ProcessingTests(unittest.TestCase):
         self.assertTrue(accepts_tracking("Flasheye", {"header": {"frame_id": 137}}, "137"))
         self.assertFalse(accepts_tracking("Flasheye", {"header": {"frame_id": 137}}, "138"))
         self.assertFalse(accepts_tracking("Flasheye", {"objects": []}, ""))
+
+    def test_object_sensor_filter_preserves_frame_and_keeps_empty_frames(self):
+        payload = {"header": {"frame_id": "placeholder"}, "objects": [
+            {"id": 10, "sensor_id": 1}, {"id": 20, "sensor_id": "2"},
+            {"id": 30}, {"id": 40, "sensor_id": 1}]}
+        first = filter_tracking("Flasheye", payload, "1", "object_sensor_id")
+        second = filter_tracking("Flasheye", payload, "2", "object_sensor_id")
+        self.assertEqual([obj["id"] for obj in first["objects"]], [10, 40])
+        self.assertEqual([obj["id"] for obj in second["objects"]], [20])
+        self.assertIs(first["header"], payload["header"])
+        self.assertEqual(len(payload["objects"]), 4)
+        self.assertEqual(filter_tracking("Flasheye", payload, "3", "object_sensor_id")["objects"], [])
+        self.assertIsNone(filter_tracking("Flasheye", payload, "", "object_sensor_id"))
+        self.assertIsNone(filter_tracking("Flasheye", {"objects": payload["objects"]}, "1", "object_sensor_id"))
 
     def test_queued_frames_preserve_line_crossing_event(self):
         config = app.default_lidar("a")
@@ -46,6 +60,26 @@ class ProcessingTests(unittest.TestCase):
             self.assertFalse(any("publish queued" in line for line in captured.output))
         finally:
             processor.stop()
+
+    def test_occupancy_publishes_without_filling_event_history(self):
+        config = app.default_lidar("occupancy-publish")
+        config["regions"] = [{"id": "zone", "type": "polygon",
+                              "points": [[0, 0], [10, 0], [10, 10], [0, 10]]}]
+        config["rules"] = [{"id": "count", "name": "Count", "type": "occupancy",
+                            "region_id": "zone", "class_filter": ["car"],
+                            "publish_interval_ms": 500}]
+        engine = LidarEngine(config)
+        published = []
+        client = SimpleNamespace(publish=lambda topic, body, qos: published.append((topic, json.loads(body))))
+        payload = {"header": {"frame_id": "f", "stamp": {"secs": 1}},
+                   "objects": [{"id": 7, "sensor_id": 1, "predicted_class": "car",
+                                "centroid": {"x": 5, "y": 5}}]}
+        self.assertEqual(app.process_tracking(engine, payload, client), 1)
+        self.assertEqual(published[0][0], "events")
+        self.assertEqual(published[0][1]["event_type"], "occupancy")
+        self.assertEqual(published[0][1]["objects"], [{"track_id": "7", "class": "car"}])
+        self.assertEqual(engine.snapshot()["events"], [])
+        self.assertEqual(engine.snapshot()["occupancy_events"][0]["count"], 1)
 
     def test_mqtt_callback_queues_frames_in_order(self):
         config = app.default_lidar("a")
@@ -90,6 +124,32 @@ class ProcessingTests(unittest.TestCase):
         self.assertEqual(processors["137"].status()["filtered_frames"], 2)
         self.assertEqual(processors["138"].status()["filtered_frames"], 2)
         self.assertTrue(any("Tracking frame filtered lidar=137" in line for line in captured.output))
+
+    def test_shared_topic_routes_mixed_object_sensors_to_their_agents(self):
+        engines = {}
+        processors = {}
+        received = {"137": [], "138": []}
+        for lidar_id, sensor_id in (("137", "1"), ("138", "2")):
+            config = app.default_lidar(lidar_id)
+            config["mqtt"]["topic"] = "tracking"
+            config["sensor_filter_mode"] = "object_sensor_id"
+            config["sensor_id"] = sensor_id
+            engine = LidarEngine(config)
+            engines[lidar_id] = engine
+            processors[lidar_id] = LidarProcessor(
+                engine, lambda e, payload, client, key=lidar_id:
+                received[key].append([obj["sensor_id"] for obj in payload["objects"]]) or 0)
+        payload = {"header": {"frame_id": "placeholder"}, "objects": [
+            {"id": 10, "sensor_id": 1}, {"id": 20, "sensor_id": 2}, {"id": 30}]}
+        with patch.object(app, "ENGINES", engines), patch.object(app, "PROCESSORS", processors):
+            message = SimpleNamespace(topic="tracking", payload=json.dumps(payload).encode())
+            for lidar_id in engines:
+                app.on_message(lidar_id, None, None, message)
+            for processor in processors.values():
+                processor.start()
+                processor.pending.join()
+                processor.stop()
+        self.assertEqual(received, {"137": [[1]], "138": [[2]]})
 
     def test_one_lidar_does_not_wait_for_another(self):
         blocked = threading.Event()

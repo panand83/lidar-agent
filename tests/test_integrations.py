@@ -1,10 +1,12 @@
 import json
 import tempfile
+import threading
 import time
+from io import BytesIO
 from pathlib import Path
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import app
 from engine import LidarEngine
@@ -127,6 +129,44 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(len(service.scheduled), 11)
         self.assertEqual(service.snapshot("lidar-b")["rules"], {})
 
+    def test_recent_generated_alerts_are_bounded_and_separate_by_lidar(self):
+        service = IntegrationService(start_workers=False)
+        service.ingest("lidar-a", "rule", {"list": [{**RULE["list"][0], "warningLights": []}]})
+        config = {"map_alignment": {"geo": GEO}, "mqtt": {"qos": 1},
+                  "integrations": {"subalert_topic": "subalert", "mappings": [MAPPING]}}
+        service.dispatch("lidar-a", config, {**EVENT, "event_id": "first"}, FakeClient())
+        alert = service.recent_alerts("lidar-a")[0]
+        self.assertEqual(alert["source_event_id"], "first")
+        self.assertEqual(alert["event_id"], f'{alert["vehicle_id"]}_1793')
+        self.assertEqual(alert["external_rule_name"], "Wrong Way Vehicle")
+        self.assertEqual(alert["topic"], "subalert")
+        self.assertEqual(service.recent_alerts("lidar-b"), [])
+        for index in range(201):
+            service.dispatch("lidar-a", config, {**EVENT, "event_id": f"event-{index}"}, FakeClient())
+        self.assertEqual(len(service.recent_alerts("lidar-a")), 200)
+        self.assertEqual(service.recent_alerts("lidar-a")[0]["source_event_id"], "event-200")
+        service.reset_alerts("lidar-a")
+        self.assertEqual(service.recent_alerts("lidar-a"), [])
+
+    def test_reset_integration_alerts_endpoint_does_not_clear_source_events(self):
+        service = IntegrationService(start_workers=False)
+        service.ingest("lidar-a", "rule", RULE)
+        config = {"map_alignment": {"geo": GEO}, "mqtt": {"qos": 1},
+                  "integrations": {"mappings": [MAPPING]}}
+        service.dispatch("lidar-a", config, EVENT, FakeClient())
+        engine = LidarEngine(app.default_lidar("lidar-a"))
+        engine.events.appendleft({"event_id": "source-event"})
+        processor = SimpleNamespace(lock=threading.RLock(), engine=engine)
+        handler = SimpleNamespace(path="/api/lidars/lidar-a/integration-alerts-reset",
+                                  headers={"Content-Length": "0"}, rfile=BytesIO(), send_json=Mock())
+        with patch.object(app, "ENGINES", {"lidar-a": engine}), \
+             patch.object(app, "PROCESSORS", {"lidar-a": processor}), \
+             patch.object(app, "INTEGRATIONS", service):
+            app.Handler.do_POST(handler)
+        self.assertEqual(service.recent_alerts("lidar-a"), [])
+        self.assertEqual(len(engine.events), 1)
+        handler.send_json.assert_called_once_with({"ok": True})
+
     def test_subalert_debounce_is_per_mapping_across_tracks(self):
         service = IntegrationService(start_workers=False)
         service.ingest("lidar-a", "rule", RULE)
@@ -141,6 +181,7 @@ class IntegrationTests(unittest.TestCase):
             clock[0] = 102.0
             service.dispatch("lidar-a", config, {**EVENT, "event_id": "event-two"}, FakeClient())
             self.assertEqual(service.pending.qsize(), 1)
+            self.assertEqual(len(service.recent_alerts("lidar-a")), 1)
             self.assertEqual(service.device_pending.qsize(), 2)
             service.dispatch("lidar-a", config, {**EVENT, "track_id": "other"}, FakeClient())
             self.assertEqual(service.pending.qsize(), 1)
@@ -161,6 +202,51 @@ class IntegrationTests(unittest.TestCase):
         service.cancel("lidar-a", clear_debounce=True)
         self.assertFalse(service.subalert_debounce)
         self.assertFalse(service.debounce_expirations)
+
+    def test_multiple_lidar_rules_share_one_mapping_and_debounce(self):
+        service = IntegrationService(start_workers=False)
+        service.ingest("lidar-a", "rule", RULE)
+        service.ingest("lidar-a", "rse", RSE)
+        mapping = {**MAPPING, "rule_ids": ["local-rule", "zone-rule"], "debounce_sec": 5}
+        mapping.pop("rule_id")
+        config = {"map_alignment": {"geo": GEO}, "mqtt": {"qos": 1},
+                  "integrations": {"subalert_topic": "subalert", "mappings": [mapping]}}
+        clock = [100.0]
+        with patch("integrations.time.monotonic", side_effect=lambda: clock[0]):
+            service.dispatch("lidar-a", config, EVENT, FakeClient())
+            clock[0] = 102.0
+            service.dispatch("lidar-a", config, {**EVENT, "rule_id": "zone-rule", "event_id": "event-two"}, FakeClient())
+            self.assertEqual(service.pending.qsize(), 1)
+            self.assertEqual(service.device_pending.qsize(), 2)
+            self.assertEqual(service.snapshot("lidar-a")["status"]["subalerts_debounced"], 1)
+            clock[0] = 105.0
+            service.dispatch("lidar-a", config, {**EVENT, "rule_id": "zone-rule", "event_id": "event-three"}, FakeClient())
+        self.assertEqual(service.pending.qsize(), 2)
+        self.assertEqual(service.device_pending.qsize(), 4)
+
+    def test_zero_debounce_does_not_keep_timer_entries(self):
+        service = IntegrationService(start_workers=False)
+        service.ingest("lidar-a", "rule", RULE)
+        config = {"map_alignment": {"geo": GEO}, "mqtt": {"qos": 1},
+                  "integrations": {"mappings": [{**MAPPING, "debounce_sec": 0}]}}
+        service.dispatch("lidar-a", config, EVENT, FakeClient())
+        service.dispatch("lidar-a", config, {**EVENT, "event_id": "event-two"}, FakeClient())
+        self.assertEqual(service.pending.qsize(), 2)
+        self.assertEqual(service.subalert_debounce, {})
+        self.assertEqual(service.debounce_expirations, [])
+
+    def test_process_tracking_dispatches_each_selected_rule_before_events(self):
+        config = app.default_lidar("lidar-a")
+        config["integrations"]["mappings"] = [{**MAPPING, "rule_ids": ["local-rule", "zone-rule"]}]
+        events = [{"rule_id": "local-rule", "event_id": "one"},
+                  {"rule_id": "zone-rule", "event_id": "two"}]
+        engine = SimpleNamespace(config=config, process=lambda payload: events, error=None)
+        called = []
+        service = SimpleNamespace(dispatch=lambda *args: called.append(args[2]["event_id"]),
+                                  report_error=lambda *args: None)
+        with patch.object(app, "INTEGRATIONS", service):
+            app.process_tracking(engine, {}, FakeClient())
+        self.assertEqual(called, ["one", "two"])
 
     def test_info_logs_generated_subalert_and_debounce_skip_with_ids(self):
         service = IntegrationService(start_workers=False)

@@ -193,7 +193,150 @@ async function main() {
       const capture = await send('Page.captureScreenshot', {format: 'png'});
       fs.writeFileSync(screenshot, Buffer.from(capture.data, 'base64'));
     }
-    console.log(JSON.stringify({modalAligned: true, draggable: true, heading, closed, escaped, disabledHeading, selected, dragged, draft}));
+    const integrationAlerts = await evaluate(`(() => {
+      document.querySelector('[data-tab="integrationAlerts"]').click();
+      state.snapshot.integration_alerts = [{rule_name:'Crossing',event_id:'00 1234 5678 9012 3456_1793',
+        vehicle_id:'00 1234 5678 9012 3456',
+        external_rule_name:'Wrong Way',zone:1,topic:'subalert',timestamp:'2026-10-19T12:00:00Z'},
+        {rule_name:'Exit Rule',event_id:'confirmation_1793',vehicle_id:'confirmation',
+          external_rule_name:'Wrong Way',zone:3,topic:'subalert',timestamp:'2026-10-19T12:00:01Z'}];
+      renderIntegrationAlerts();
+      const row = document.querySelector('#integrationAlertsList .integrationAlert');
+      const identity = row?.querySelector('.integrationAlertIdentity');
+      const timing = row?.querySelector('.integrationAlertTiming');
+      const result = {visible:!document.getElementById('integrationAlertsPanel').hidden,
+        columns:row?.children.length,
+        vehicle:identity?.querySelector('strong')?.textContent,
+        mapping:identity?.querySelector('small')?.textContent,
+        noSubalertId:!row?.textContent.includes('_1793'),
+        time:!!timing?.querySelector('time')?.textContent,
+        rule:timing?.querySelector('small')?.textContent,
+        vehicleFits:identity?.querySelector('strong')?.scrollWidth<=identity?.querySelector('strong')?.clientWidth,
+        separated:identity?.getBoundingClientRect().right<=timing?.getBoundingClientRect().left,
+        hover:row?.title,
+        confirmation:document.querySelectorAll('#integrationAlertsList .integrationAlert')[1]?.querySelector('.integrationAlertIdentity small')?.textContent};
+      state.snapshot.integration_alerts = [];
+      renderIntegrationAlerts();
+      result.empty = document.getElementById('integrationAlertsList').textContent.includes('No generated integration alerts');
+      return result;
+    })()`);
+    assert.deepEqual(integrationAlerts, {visible:true,columns:2,
+      vehicle:'00 1234 5678 9012 3456',mapping:'Wrong-way vehicle | Detection Zone',
+      noSubalertId:true,time:true,rule:'Crossing',vehicleFits:true,separated:true,
+      hover:'External rule: Wrong Way\nZone: 1\nTopic: subalert',
+      confirmation:'Wrong-way vehicle | Confirmation Zone',empty:true});
+    const recentEvents = await evaluate(`(() => {
+      document.querySelector('[data-tab="events"]').click();
+      state.snapshot.events = [
+        {event_id:'event-1',track_id:'96484',class:'car',event_type:'line_crossing',
+          direction:'backward',rule_name:'Multi Line Crossing',timestamp:1791474512}
+      ];
+      state.snapshot.occupancy_events = [
+        {event_id:'event-3',rule_id:'occupancy-a',event_type:'occupancy',count:5,
+          rule_name:'Passing Zone Occupancy',timestamp:1791474510},
+        {event_id:'event-4',rule_id:'occupancy-b',event_type:'occupancy',count:2,
+          rule_name:'Waiting Zone Occupancy',timestamp:1791474509}
+      ];
+      renderEvents();
+      const rows = [...document.querySelectorAll('#eventsList .integrationAlert')];
+      const identity = rows[0]?.querySelector('.integrationAlertIdentity');
+      const timing = rows[0]?.querySelector('.integrationAlertTiming');
+      const result = {visible:!document.getElementById('eventsPanel').hidden,
+        columns:rows[0]?.children.length,rowCount:rows.length,
+        rule:identity?.querySelector('strong')?.textContent,
+        ruleColor:identity?.querySelector('strong')&&getComputedStyle(identity.querySelector('strong')).color,
+        object:identity?.querySelector('small')?.textContent,
+        time:!!timing?.querySelector('time')?.textContent,
+        description:timing?.querySelector('small')?.textContent,
+        separated:identity?.getBoundingClientRect().right<=timing?.getBoundingClientRect().left,
+        occupancy:rows[1]?.querySelector('.integrationAlertIdentity small')?.textContent,
+        occupancyTime:rows[1]?.querySelector('time')?.dateTime,
+        occupancyRule:rows[1]?.querySelector('.integrationAlertIdentity strong')?.textContent,
+        otherOccupancy:rows[2]?.querySelector('.integrationAlertIdentity small')?.textContent};
+      state.snapshot.events = [];
+      state.snapshot.occupancy_events = [];
+      renderEvents();
+      result.empty = document.getElementById('eventsList').textContent.includes('No recent events');
+      return result;
+    })()`);
+    assert.deepEqual(recentEvents, {visible:true,columns:2,rowCount:3,rule:'Multi Line Crossing',
+      ruleColor:'rgb(255, 213, 79)',object:'Object 96484',
+      time:true,description:'Line crossing | backward',
+      separated:true,occupancy:'5 objects',
+      occupancyTime:new Date(1791474510*1000).toISOString(),
+      occupancyRule:'Passing Zone Occupancy',otherOccupancy:'2 objects',empty:true});
+    const occupancyHighlight = await evaluate(`(async () => {
+      state.occupancyDisplay = new Map();
+      state.occupancyInitialized = false;
+      state.snapshot.occupancy_events = [{event_id:'occupancy-1',rule_id:'occupancy-a',
+        event_type:'occupancy',count:3,rule_name:'Passing Zone Occupancy',timestamp:1791474508}];
+      renderEvents();
+      const first = document.querySelector('#eventsList .recentEvent');
+      const initiallyHighlighted = first.classList.contains('occupancyUpdated');
+      state.snapshot.occupancy_events = [{event_id:'occupancy-2',rule_id:'occupancy-a',
+        event_type:'occupancy',count:5,rule_name:'Passing Zone Occupancy',timestamp:1791474510}];
+      renderEvents();
+      const updated = document.querySelector('#eventsList .recentEvent');
+      const count = updated.querySelector('.integrationAlertIdentity small');
+      const time = updated.querySelector('time');
+      const result = {rowCount:document.querySelectorAll('#eventsList .recentEvent').length,
+        initiallyHighlighted,highlighted:updated.classList.contains('occupancyUpdated'),
+        count:count.textContent,time:time.dateTime,
+        countBackground:getComputedStyle(count).backgroundColor,
+        timeBackground:getComputedStyle(time).backgroundColor};
+      renderEvents();
+      result.persistsAcrossRender=document.querySelector('#eventsList .recentEvent').classList.contains('occupancyUpdated');
+      state.snapshot.occupancy_events.unshift({event_id:'occupancy-new',rule_id:'occupancy-new',
+        event_type:'occupancy',count:1,rule_name:'New Zone Occupancy',timestamp:1791474511});
+      renderEvents();
+      result.newRuleHighlighted=[...document.querySelectorAll('#eventsList .recentEvent')]
+        .find(row=>row.querySelector('strong')?.textContent==='New Zone Occupancy')
+        ?.classList.contains('occupancyUpdated');
+      await new Promise(resolve=>setTimeout(resolve,1600));
+      result.expired=!updated.classList.contains('occupancyUpdated');
+      return result;
+    })()`);
+    assert.deepEqual(occupancyHighlight, {rowCount:1,initiallyHighlighted:false,highlighted:true,
+      count:'5 objects',time:new Date(1791474510*1000).toISOString(),
+      countBackground:'rgb(255, 213, 79)',timeBackground:'rgb(255, 213, 79)',
+      persistsAcrossRender:true,newRuleHighlighted:true,expired:true});
+    const canceledToggles = await evaluate(`(async () => {
+      const oldConfirm = window.confirm;
+      const oldApi = window.api;
+      const prompts = [];
+      let requests = 0;
+      window.confirm = prompt => { prompts.push(prompt); return false; };
+      window.api = async () => { requests++; throw Error('Unexpected request'); };
+      try {
+        const sidebar = document.querySelector('#lidars .agentRow input[type="checkbox"]');
+        sidebar.checked = true;
+        await setAgentEnabled(state.id,true,sidebar);
+        const sidebarRestored = !sidebar.checked;
+        sidebar.checked = false;
+        await setAgentEnabled(state.id,false,sidebar);
+        const disableRestored = sidebar.checked;
+        sidebar.checked = false;
+        const detail = document.getElementById('enabled');
+        detail.checked = true;
+        await setAgentEnabled(state.id,true,detail);
+        return {sidebarRestored,disableRestored,detailRestored:!detail.checked,requests,prompts};
+      } finally { window.confirm = oldConfirm; window.api = oldApi; }
+    })()`);
+    assert.deepEqual(canceledToggles, {sidebarRestored:true,disableRestored:true,detailRestored:true,requests:0,
+      prompts:['Enable Editor Test? Tracking and rule execution will start.',
+        'Disable Editor Test? Tracking and rule execution will stop.',
+        'Enable Editor Test? Tracking and rule execution will start.']});
+    const sensorFilter = await evaluate(`(() => {
+      document.querySelector('[data-tab="lidar"]').click();
+      const select = document.getElementById('sensorFilterMode');
+      select.value = 'object_sensor_id';
+      select.dispatchEvent(new Event('change', {bubbles:true}));
+      return {visible:!document.getElementById('lidarPanel').hidden,
+        mode:state.config.sensor_filter_mode,
+        placeholder:document.getElementById('sensorId').placeholder};
+    })()`);
+    assert.deepEqual(sensorFilter, {visible:true,mode:'object_sensor_id',placeholder:'Required object sensor_id'});
+    console.log(JSON.stringify({modalAligned: true, draggable: true, heading, closed, escaped, disabledHeading, selected, dragged, draft, integrationAlerts, recentEvents, occupancyHighlight, canceledToggles, sensorFilter}));
     socket.close();
   } finally { browser.kill(); }
 }

@@ -25,8 +25,11 @@ flowchart TD
     ENGINE --> RULES["Evaluate line and zone rules; evaluate occupancy separately"]
     RULES --> HAS_EVENT{"Event emitted?"}
     HAS_EVENT -- No --> NEXT["Wait for next frame"]
-    HAS_EVENT -- Yes --> HISTORY["Keep latest 200 events in memory"]
+    HAS_EVENT -- Yes --> EVENTTYPE{"Occupancy event?"}
+    EVENTTYPE -- No --> HISTORY["Keep latest 200 crossing/transition events in memory"]
+    EVENTTYPE -- Yes --> LATEST["Update latest occupancy count and time per rule"]
     HISTORY --> MAPPING{"Enabled alert mapping for this rule?"}
+    LATEST --> MAPPING
     MAPPING -- Yes --> INTEGRATION["Validate external rule, vehicle data, alignment, and debounce"]
     INTEGRATION --> JOBS["Queue subalert publish and warning-device jobs"]
     JOBS --> PUBWORKERS["Subalert MQTT workers"]
@@ -36,7 +39,7 @@ flowchart TD
     EVENTPUB --> BROKER["MQTT broker"]
     PUBWORKERS --> BROKER
     CACHE --> INTEGRATION
-    ENGINE --> SNAPSHOT["API snapshots: tracks, events, status, queue metrics"]
+    ENGINE --> SNAPSHOT["API snapshots: tracks, event history, latest occupancy, status, queue metrics"]
     CACHE --> SNAPSHOT
     SNAPSHOT --> UI
 ```

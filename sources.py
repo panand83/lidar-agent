@@ -19,15 +19,30 @@ def _xy(value):
         return None
 
 
-def parse_flasheye(payload, sensor_filter):
+def filter_flasheye(payload, sensor_filter, filter_mode="frame_id"):
     if not isinstance(payload, dict):
         return None
     header = payload.get("header")
     if not isinstance(header, dict) or header.get("frame_id") is None:
         return None
-    frame = str(header["frame_id"])
-    if sensor_filter and frame != str(sensor_filter):
+    if filter_mode == "frame_id":
+        return payload if not sensor_filter or str(header["frame_id"]) == str(sensor_filter) else None
+    if filter_mode != "object_sensor_id" or not sensor_filter:
         return None
+    raw_objects = payload.get("objects")
+    if not isinstance(raw_objects, list):
+        return None
+    selected = [obj for obj in raw_objects if isinstance(obj, dict) and obj.get("sensor_id") is not None
+                and str(obj["sensor_id"]) == str(sensor_filter)]
+    return {**payload, "objects": selected}
+
+
+def parse_flasheye(payload, sensor_filter, filter_mode="frame_id"):
+    payload = filter_flasheye(payload, sensor_filter, filter_mode)
+    if payload is None:
+        return None
+    header = payload["header"]
+    frame = str(header["frame_id"])
     raw_objects = payload.get("objects")
     if not isinstance(raw_objects, list):
         return None
@@ -47,24 +62,17 @@ def parse_flasheye(payload, sensor_filter):
 
 
 SOURCE_PARSERS = {"Flasheye": parse_flasheye}
+SOURCE_INTAKE_FILTERS = {"Flasheye": filter_flasheye}
 
 
-def _flasheye_accepts(payload, sensor_filter):
-    if not isinstance(payload, dict):
-        return False
-    header = payload.get("header")
-    if not isinstance(header, dict) or header.get("frame_id") is None:
-        return False
-    return not sensor_filter or str(header["frame_id"]) == str(sensor_filter)
-
-
-SOURCE_INTAKE_FILTERS = {"Flasheye": _flasheye_accepts}
-
-
-def accepts_tracking(source, payload, sensor_filter=""):
+def filter_tracking(source, payload, sensor_filter="", filter_mode="frame_id"):
     matcher = SOURCE_INTAKE_FILTERS.get(source)
-    return matcher(payload, sensor_filter) if matcher else True
+    return matcher(payload, sensor_filter, filter_mode) if matcher else payload
 
 
-def parse_tracking(source, payload, sensor_filter=""):
-    return SOURCE_PARSERS[source](payload, sensor_filter)
+def accepts_tracking(source, payload, sensor_filter="", filter_mode="frame_id"):
+    return filter_tracking(source, payload, sensor_filter, filter_mode) is not None
+
+
+def parse_tracking(source, payload, sensor_filter="", filter_mode="frame_id"):
+    return SOURCE_PARSERS[source](payload, sensor_filter, filter_mode)

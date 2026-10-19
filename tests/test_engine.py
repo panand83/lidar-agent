@@ -1,5 +1,6 @@
 import unittest
 import json
+from unittest.mock import patch
 from pathlib import Path
 
 from engine import LidarEngine, heading
@@ -22,6 +23,147 @@ def config(lidar_id):
 
 
 class EngineTests(unittest.TestCase):
+    def test_zone_both_handoff_requires_observed_leave(self):
+        for point_mode in ("centroid", "object_center"):
+            with self.subTest(point_mode=point_mode):
+                settings = config("zone-handoff")
+                rule = settings["rules"][1]
+                rule["direction_mode"] = "both"
+                rule["intersection_point_mode"] = point_mode
+                settings["rules"] = [rule]
+                settings["handoff"] = {"enabled": True}
+                with patch.dict("os.environ", {"KLA_TRACK_HANDOFF_MODE": "on"}):
+                    engine = LidarEngine(settings)
+                for t, x, oid in ((1, 0, 1), (1.1, 2, 1), (1.2, 4, 1),
+                                  (1.3, 5, 2), (1.4, 6, 2), (1.5, 7, 2)):
+                    self.assertEqual(engine.process(frame(t, x, 0, oid=oid)), [])
+                self.assertEqual(engine.status()["handoff_accepted"], 1)
+                self.assertEqual(engine.tracks[("f", "s1", "2")]["zone_entries"][rule["id"]], 1.1)
+                events = engine.process(frame(1.6, 10, 0, oid=2))
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["event_type"], "zone_transition")
+                self.assertEqual(events[0]["direction"], "both")
+                self.assertEqual(events[0]["track_id"], "2")
+                self.assertEqual(events[0]["entered_at"], 1.1)
+
+    def test_zone_both_handoff_observe_does_not_transfer_enter(self):
+        settings = config("zone-observe")
+        settings["rules"] = [settings["rules"][1]]
+        settings["rules"][0]["direction_mode"] = "both"
+        settings["handoff"] = {"enabled": True}
+        with patch.dict("os.environ", {"KLA_TRACK_HANDOFF_MODE": "observe"}):
+            engine = LidarEngine(settings)
+        for t, x, oid in ((1, 0, 1), (1.1, 2, 1), (1.2, 4, 1),
+                          (1.3, 5, 2), (1.4, 6, 2), (1.5, 7, 2), (1.6, 10, 2)):
+            self.assertEqual(engine.process(frame(t, x, 0, oid=oid)), [])
+        self.assertEqual(engine.status()["handoff_proposals"], 1)
+        self.assertEqual(engine.status()["handoff_accepted"], 0)
+
+    def test_zone_both_handoff_rejects_competing_car(self):
+        settings = config("zone-ambiguous")
+        settings["rules"] = [settings["rules"][1]]
+        settings["rules"][0]["direction_mode"] = "both"
+        settings["handoff"] = {"enabled": True}
+        with patch.dict("os.environ", {"KLA_TRACK_HANDOFF_MODE": "on"}):
+            engine = LidarEngine(settings)
+        for t, x, oid in ((1, 0, 1), (1.1, 2, 1), (1.2, 4, 1),
+                          (1.3, 5, 2), (1.4, 6, 2), (1.45, 8, 3), (1.5, 7, 2), (1.6, 10, 2)):
+            engine.process(frame(t, x, 0, oid=oid))
+        self.assertEqual(engine.status()["handoff_accepted"], 0)
+        self.assertGreater(engine.status()["handoff_ambiguous"], 0)
+        self.assertEqual(len(engine.events), 0)
+
+    def test_zone_both_handoff_does_not_infer_leave_before_confirmation(self):
+        settings = config("zone-early-leave")
+        settings["rules"] = [settings["rules"][1]]
+        settings["rules"][0]["direction_mode"] = "both"
+        settings["handoff"] = {"enabled": True}
+        with patch.dict("os.environ", {"KLA_TRACK_HANDOFF_MODE": "on"}):
+            engine = LidarEngine(settings)
+        for t, x, oid in ((1, 0, 1), (1.1, 2, 1), (1.2, 4, 1),
+                          (1.3, 5, 2), (1.4, 10, 2), (1.5, 11, 2)):
+            self.assertEqual(engine.process(frame(t, x, 0, oid=oid)), [])
+        self.assertEqual(engine.status()["handoff_accepted"], 0)
+        self.assertEqual(len(engine.events), 0)
+
+    def test_handoff_requires_opt_in_and_actual_exit_crossing(self):
+        settings = config("handoff")
+        settings["rules"] = [settings["rules"][0]]
+        settings["handoff"] = {"enabled": True}
+        with patch.dict("os.environ", {"KLA_TRACK_HANDOFF_MODE": "on"}):
+            engine = LidarEngine(settings)
+        for t, x, oid in ((1, -2, 1), (1.1, 1, 1), (1.2, 3, 1),
+                          (1.3, 4, 2), (1.4, 5, 2), (1.5, 6, 2)):
+            self.assertEqual(engine.process(frame(t, x, 0, oid=oid)), [])
+        self.assertEqual(engine.status()["handoff_accepted"], 1)
+        self.assertEqual(engine.process(frame(1.6, 11, 0, oid=2))[0]["track_id"], "2")
+        self.assertEqual(engine.process(frame(1.7, 12, 0, oid=1)), [])
+        self.assertEqual(len(engine.events), 1)
+
+    def test_handoff_observe_and_off_do_not_emit(self):
+        for mode in ("observe", "off"):
+            settings = config(mode)
+            settings["rules"] = [settings["rules"][0]]
+            settings["handoff"] = {"enabled": True}
+            with patch.dict("os.environ", {"KLA_TRACK_HANDOFF_MODE": mode}):
+                engine = LidarEngine(settings)
+            for t, x, oid in ((1, -2, 1), (1.1, 1, 1), (1.2, 3, 1),
+                              (1.3, 4, 2), (1.4, 5, 2), (1.5, 6, 2), (1.6, 11, 2)):
+                engine.process(frame(t, x, 0, oid=oid))
+            self.assertEqual(len(engine.events), 0)
+            self.assertEqual(engine.status()["handoff_accepted"], 0)
+            self.assertEqual(engine.status()["handoff_proposals"], 1 if mode == "observe" else 0)
+
+    def test_handoff_rejects_competing_replacement(self):
+        settings = config("ambiguous")
+        settings["rules"] = [settings["rules"][0]]
+        settings["handoff"] = {"enabled": True}
+        with patch.dict("os.environ", {"KLA_TRACK_HANDOFF_MODE": "on"}):
+            engine = LidarEngine(settings)
+        for t, x, oid in ((1, -2, 1), (1.1, 1, 1), (1.2, 3, 1),
+                          (1.3, 4, 2), (1.4, 5, 2), (1.45, 7.5, 3), (1.5, 6, 2)):
+            engine.process(frame(t, x, 0, oid=oid))
+        self.assertEqual(engine.status()["handoff_accepted"], 0)
+        self.assertGreater(engine.status()["handoff_ambiguous"], 0)
+
+    def test_handoff_rejects_unsafe_candidates(self):
+        cases = {
+            "late": ((2.1, 4), (2.2, 5), (2.3, 6)),
+            "distant": ((1.3, 8), (1.4, 9), (1.5, 10)),
+            "reverse": ((1.3, 4), (1.4, 3), (1.5, 2)),
+            "already_past_exit": ((1.3, 11), (1.4, 12), (1.5, 13)),
+            "wrong_class": ((1.3, 4), (1.4, 5), (1.5, 6)),
+            "wrong_sensor": ((1.3, 4), (1.4, 5), (1.5, 6)),
+        }
+        for name, points in cases.items():
+            with self.subTest(name=name):
+                settings = config(name)
+                settings["rules"] = [settings["rules"][0]]
+                settings["handoff"] = {"enabled": True}
+                with patch.dict("os.environ", {"KLA_TRACK_HANDOFF_MODE": "on"}):
+                    engine = LidarEngine(settings)
+                for t, x in ((1, -2), (1.1, 1), (1.2, 3)):
+                    engine.process(frame(t, x, 0, oid=1))
+                for t, x in points:
+                    payload = frame(t, x, 0, sensor="other" if name == "wrong_sensor" else "s1", oid=2)
+                    if name == "wrong_class":
+                        payload["objects"][0]["predicted_class"] = "human"
+                    engine.process(payload)
+                self.assertEqual(engine.status()["handoff_accepted"], 0)
+                self.assertEqual(len(engine.events), 0)
+
+    def test_handoff_disabled_per_lidar_even_when_globally_on(self):
+        settings = config("disabled")
+        settings["rules"] = [settings["rules"][0]]
+        settings["handoff"] = {"enabled": False}
+        with patch.dict("os.environ", {"KLA_TRACK_HANDOFF_MODE": "on"}):
+            engine = LidarEngine(settings)
+        for t, x, oid in ((1, -2, 1), (1.1, 1, 1), (1.2, 3, 1),
+                          (1.3, 4, 2), (1.4, 5, 2), (1.5, 6, 2), (1.6, 11, 2)):
+            engine.process(frame(t, x, 0, oid=oid))
+        self.assertEqual(engine.status()["handoff_proposals"], 0)
+        self.assertEqual(len(engine.events), 0)
+
     def test_ordered_crossing_and_zone(self):
         engine = LidarEngine(config("lidar-a"))
         self.assertEqual(engine.process(frame(1, -2, 0)), [])
@@ -129,6 +271,30 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(next(iter(first.tracks.values()))["frame"], "lidar-one")
         self.assertEqual(next(iter(second.tracks.values()))["frame"], "lidar-two")
 
+    def test_object_sensor_filter_separates_tracks_and_ages_empty_frames(self):
+        first_settings = config("first")
+        first_settings["sensor_filter_mode"] = "object_sensor_id"
+        first_settings["sensor_id"] = "1"
+        second_settings = config("second")
+        second_settings["sensor_filter_mode"] = "object_sensor_id"
+        second_settings["sensor_id"] = "2"
+        first, second = LidarEngine(first_settings), LidarEngine(second_settings)
+        mixed = {"header": {"frame_id": "placeholder", "stamp": {"secs": 1}},
+                 "objects": [{"id": 7, "sensor_id": 1, "predicted_class": "car",
+                              "centroid": {"x": 1, "y": 0}},
+                             {"id": 7, "sensor_id": 2, "predicted_class": "car",
+                              "centroid": {"x": 20, "y": 0}}]}
+        first.process(mixed)
+        second.process(mixed)
+        self.assertEqual([(t["sensor"], t["pos"][0]) for t in first.tracks.values()], [("1", 1)])
+        self.assertEqual([(t["sensor"], t["pos"][0]) for t in second.tracks.values()], [("2", 20)])
+        empty_for_first = {"header": {"frame_id": "placeholder", "stamp": {"secs": 7}},
+                           "objects": [mixed["objects"][1]]}
+        first.process(empty_for_first)
+        self.assertEqual(first.messages, 2)
+        self.assertEqual(first.raw_in_last_message, 0)
+        self.assertEqual(first.tracks, {})
+
     def test_non_flasheye_shape_is_ignored(self):
         engine = LidarEngine(config("a"))
         self.assertEqual(engine.process({"objects": [frame(1, 0, 0)["objects"][0]]}), [])
@@ -153,6 +319,34 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(a.snapshot()["events"], [])
         self.assertEqual(len(a.tracks), 1)
         self.assertTrue(b.events)
+
+    def test_occupancy_updates_do_not_evict_crossing_events(self):
+        settings = config("occupancy-history")
+        settings["rules"] = [
+            {"id": "crossing", "name": "Crossing", "type": "line_crossing", "enabled": True,
+             "line_region_ids": ["entry"], "line_trigger_mode": "any", "direction_mode": "any",
+             "class_filter": ["car"]},
+            {"id": "count", "name": "Count", "type": "occupancy", "enabled": True,
+             "region_id": "zone", "class_filter": ["car"], "publish_interval_ms": 500},
+        ]
+        engine = LidarEngine(settings)
+        engine.process(frame(1, -2, 0))
+        emitted = engine.process(frame(2, 2, 0))
+        self.assertEqual({event["event_type"] for event in emitted}, {"line_crossing", "occupancy"})
+        for seq in range(3, 253):
+            emitted = engine.process(frame(seq, 2, 0))
+            self.assertEqual([event["event_type"] for event in emitted], ["occupancy"])
+            self.assertIn("objects", emitted[0])
+        snapshot = engine.snapshot()
+        self.assertEqual([event["event_type"] for event in snapshot["events"]], ["line_crossing"])
+        self.assertEqual(len(snapshot["occupancy_events"]), 1)
+        self.assertEqual(snapshot["occupancy_events"][0]["count"], 1)
+        self.assertEqual(snapshot["occupancy_events"][0]["timestamp"], 252)
+        self.assertNotIn("objects", snapshot["occupancy_events"][0])
+        self.assertEqual(engine.live_snapshot()["occupancy_events"], snapshot["occupancy_events"])
+        engine.reset_events()
+        self.assertEqual(engine.snapshot()["events"], [])
+        self.assertEqual(engine.snapshot()["occupancy_events"], [])
 
     def test_reset_tracks_preserves_events_and_other_lidars(self):
         a, b = LidarEngine(config("a")), LidarEngine(config("b"))

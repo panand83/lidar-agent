@@ -15,6 +15,27 @@ from engine import LidarEngine
 
 
 class ConfigTests(unittest.TestCase):
+    def test_track_handoff_defaults_and_validation(self):
+        settings = app.default_lidar("handoff-test")
+        self.assertFalse(settings["handoff"]["enabled"])
+        app.validate(settings)
+        settings["handoff"]["enabled"] = True
+        app.validate(settings)
+        settings["handoff"]["window_ms"] = 1000
+        app.validate(settings)
+        self.assertEqual(settings["handoff"], {"enabled": True})
+
+    def test_handoff_limits_are_read_from_environment(self):
+        variables = {"KLA_HANDOFF_WINDOW_MS": "900", "KLA_HANDOFF_MAX_DISTANCE_M": "1.5",
+                     "KLA_HANDOFF_MAX_HEADING_DELTA_DEG": "20", "KLA_HANDOFF_MIN_CONFIRM_SAMPLES": "4"}
+        with patch.dict(os.environ, variables):
+            engine = LidarEngine(default_lidar("handoff-env"))
+        self.assertEqual(engine.status()["handoff_limits"], {"window_ms": 900, "max_distance_m": 1.5,
+                                                            "max_heading_delta_deg": 20, "min_confirm_samples": 4})
+        with patch.dict(os.environ, {"KLA_HANDOFF_MIN_CONFIRM_SAMPLES": "7"}):
+            with self.assertRaisesRegex(ValueError, "KLA_HANDOFF_MIN_CONFIRM_SAMPLES"):
+                LidarEngine(default_lidar("invalid-handoff-env"))
+
     def test_live_endpoint_only_returns_track_heads(self):
         engine = LidarEngine(default_lidar("live"))
         engine.tracks[("frame", "sensor", "7")] = {
@@ -26,9 +47,13 @@ class ConfigTests(unittest.TestCase):
         engine.events.appendleft({"event_id": "older", "rule_id": "rule-a", "rule_name": "Crossing",
                                   "event_type": "line_crossing", "direction": "forward", "timestamp": 99.0})
         engine.events.appendleft({"event_id": "newer", "rule_id": "rule-a", "rule_name": "Crossing",
-                                  "event_type": "line_crossing", "direction": "forward", "timestamp": 100.0,
+                                  "event_type": "line_crossing", "track_id": "7", "class": "car",
+                                  "direction": "forward", "timestamp": 100.0,
                                   "line_region_id": "line-b", "line_region_ids": ["line-a", "line-b"],
                                   "centroid": [12.0, 3.0]})
+        engine.latest_occupancy["count"] = {"event_id": "occupancy-1", "rule_id": "count",
+                                             "rule_name": "Count", "event_type": "occupancy",
+                                             "timestamp": 100.0, "count": 2, "region_id": "zone"}
         processor = SimpleNamespace(lock=threading.RLock(), engine=engine)
         with patch.object(app, "PROCESSORS", {"live": processor}):
             handler = SimpleNamespace(path="/api/lidars/live/live?after=older", send_json=Mock())
@@ -41,8 +66,23 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("points", payload["tracks"][0])
         self.assertEqual([event["event_id"] for event in payload["events"]], ["newer"])
         self.assertEqual(payload["events"][0]["line_region_ids"], ["line-a", "line-b"])
+        self.assertEqual(payload["events"][0]["track_id"], "7")
+        self.assertEqual(payload["events"][0]["class"], "car")
+        self.assertEqual(payload["occupancy_events"], [engine.latest_occupancy["count"]])
         self.assertNotIn("centroid", payload["events"][0])
         self.assertEqual(engine.snapshot()["tracks"][0]["points"], [(10.0, 2.0), (12.0, 3.0)])
+
+    def test_full_snapshot_includes_recent_integration_alerts(self):
+        engine = LidarEngine(default_lidar("live"))
+        processor = SimpleNamespace(lock=threading.RLock(), engine=engine,
+                                    status=lambda: {"resync_pending": False})
+        alerts = [{"event_id": "alert-one", "rule_name": "Crossing"}]
+        service = SimpleNamespace(recent_alerts=Mock(return_value=alerts),
+                                  snapshot=Mock(return_value={"rules": {}, "devices": {}, "status": {}}))
+        handler = SimpleNamespace(path="/api/lidars/live", send_json=Mock())
+        with patch.object(app, "PROCESSORS", {"live": processor}), patch.object(app, "INTEGRATIONS", service):
+            app.Handler.do_GET(handler)
+        self.assertEqual(handler.send_json.call_args.args[0]["integration_alerts"], alerts)
 
     def test_backup_get_returns_saved_per_lidar_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -213,6 +253,20 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["max_gap_sec"], 7)
         self.assertEqual(config["max_jump_m"], 30)
 
+    def test_object_sensor_filter_requires_value_and_keeps_legacy_mode(self):
+        config = default_lidar("object-filter")
+        config.pop("sensor_filter_mode")
+        validate(config)
+        self.assertEqual(config["sensor_filter_mode"], "frame_id")
+        config["sensor_filter_mode"] = "object_sensor_id"
+        with self.assertRaisesRegex(ValueError, "requires a value"):
+            validate(config)
+        config["sensor_id"] = "1"
+        validate(config)
+        config["sensor_filter_mode"] = "invalid"
+        with self.assertRaisesRegex(ValueError, "Unsupported sensor filter mode"):
+            validate(config)
+
     def test_config_json_can_live_in_mounted_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "lidar-config" / "lidars.json"
@@ -286,7 +340,7 @@ class ConfigTests(unittest.TestCase):
             handler = SimpleNamespace(path="/api/lidars/first", send_json=response)
             with (patch.object(app, "DATA", config_path), patch.object(app, "ENGINES", engines),
                   patch.object(app, "PROCESSORS", {"first": processor}),
-                  patch.object(app, "INTEGRATIONS", SimpleNamespace(cancel=Mock())),
+                  patch.object(app, "INTEGRATIONS", SimpleNamespace(cancel=Mock(), reset_alerts=Mock())),
                   patch.object(app, "disconnect", Mock())):
                 app.save("first")
                 app.save("second")
@@ -320,6 +374,40 @@ class ConfigTests(unittest.TestCase):
         mapping["debounce_sec"] = 5.5
         validate(config)
         self.assertEqual(mapping["debounce_sec"], 5.5)
+
+    def test_legacy_mapping_migrates_and_rule_list_validates(self):
+        config = default_lidar("mapping-migration")
+        mapping = {"id": "mapping-1", "enabled": False, "use_case": "wrongway_vehicle",
+                   "zone": 1, "rule_id": "old-rule", "external_rule_id": "external-rule"}
+        config["integrations"]["mappings"] = [mapping]
+        validate(config)
+        self.assertEqual(mapping["rule_ids"], ["old-rule"])
+        self.assertNotIn("rule_id", mapping)
+        mapping["rule_ids"] = ["old-rule", "new-rule"]
+        validate(config)
+        self.assertEqual(mapping["rule_ids"], ["old-rule", "new-rule"])
+        for invalid in ("old-rule", ["old-rule", "old-rule"], [["nested"]]):
+            mapping["rule_ids"] = invalid
+            with self.assertRaisesRegex(ValueError, "Integration LiDAR rules"):
+                validate(config)
+
+    def test_enabled_or_mapping_requires_existing_supported_rules(self):
+        config = default_lidar("or-mapping")
+        config["map_alignment"]["geo"] = {"lat": 30.4, "lon": -84.2, "heading": 0,
+                                          "origin_x": 0, "origin_y": 0, "scale": 1,
+                                          "y_direction": "left"}
+        config["regions"] = [{"id": "line", "type": "line", "points": [[0, -1], [0, 1]],
+                               "forward_hint": [1, 0]},
+                              {"id": "zone", "type": "polygon", "points": [[1, -1], [3, -1], [3, 1], [1, 1]]}]
+        config["rules"] = [{"id": "cross", "type": "line_crossing", "line_region_ids": ["line"]},
+                           {"id": "transition", "type": "zone_transition", "region_id": "zone"}]
+        mapping = {"id": "mapping", "enabled": True, "use_case": "wrongway_vehicle",
+                   "zone": 1, "rule_ids": ["cross", "transition"], "external_rule_id": "external"}
+        config["integrations"]["mappings"] = [mapping]
+        validate(config)
+        mapping["rule_ids"] = ["cross", "missing"]
+        with self.assertRaisesRegex(ValueError, "existing line-crossing or zone-transition rules"):
+            validate(config)
 
     def test_draft_rule_can_be_saved_without_geometry(self):
         config = default_lidar("test-lidar")

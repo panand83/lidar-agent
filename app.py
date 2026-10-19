@@ -17,10 +17,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
-from engine import LidarEngine
-from integrations import IntegrationService, MAX_SUBALERT_DEBOUNCE_SEC
+from engine import HANDOFF_DEFAULTS, LidarEngine
+from integrations import IntegrationService, MAX_SUBALERT_DEBOUNCE_SEC, mapping_rule_ids
 from processing import LidarProcessor
-from sources import SOURCE_PARSERS, accepts_tracking
+from sources import SOURCE_PARSERS, filter_tracking
 
 ROOT = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("KLA_CONFIG_DIR", str(ROOT / "data"))) / "lidars.json"
@@ -86,6 +86,7 @@ def configure_logging():
 def default_lidar(lidar_id):
     return {"id": lidar_id, "name": lidar_id, "enabled": True, "source": "Flasheye",
             "sensor_id": os.environ.get("KLA_DEFAULT_SENSOR_ID", ""),
+            "sensor_filter_mode": os.environ.get("KLA_DEFAULT_SENSOR_FILTER_MODE", "frame_id"),
             "mqtt": {"host": os.environ.get("KLA_MQTT_HOST", "192.168.1.181"),
                      "port": int(os.environ.get("KLA_MQTT_PORT", "1883")),
                      "topic": os.environ.get("KLA_MQTT_TOPIC", "Flasheye/ubuntu/tracking"),
@@ -93,6 +94,7 @@ def default_lidar(lidar_id):
                      "qos": int(os.environ.get("KLA_MQTT_QOS", "1"))},
             "max_gap_sec": float(os.environ.get("KLA_DEFAULT_MAX_GAP_SEC", "5")),
             "max_jump_m": float(os.environ.get("KLA_DEFAULT_MAX_JUMP_M", "25")),
+            "handoff": copy.deepcopy(HANDOFF_DEFAULTS),
             "regions": [], "rules": [], "map_alignment": {"control_points": [], "geo": None},
             "integrations": {"subalert_topic": os.environ.get("SUBALERT_TOPIC", "subalert"),
                              "rule_topic": os.environ.get("RULE_CONFIGURATION_TOPIC", "Rule_Configuration"),
@@ -126,6 +128,7 @@ def load():
             raise ValueError(f"LiDAR ID does not match configuration filename: {path}")
         lidar_file(config["id"])
         config.setdefault("mqtt", {})["event_topic"] = "events"
+        config.setdefault("handoff", copy.deepcopy(HANDOFF_DEFAULTS))
         integration = config.setdefault("integrations", {})
         for key, value in default_lidar(config["id"])["integrations"].items():
             integration.setdefault(key, value)
@@ -163,6 +166,7 @@ def restore_lidar_config(backup, replace=False):
     config["name"] = str(config.get("name") or config.get("id") or "")
     defaults = default_lidar(str(config.get("id", "")))
     config.setdefault("integrations", copy.deepcopy(defaults["integrations"]))
+    config.setdefault("handoff", copy.deepcopy(HANDOFF_DEFAULTS))
     try:
         validate(config)
     except (AttributeError, IndexError) as exc:
@@ -225,6 +229,11 @@ def validate(config, existing=None):
     config.setdefault("source", "Flasheye")
     if config["source"] not in SOURCE_PARSERS:
         raise ValueError("Unsupported tracking source")
+    config.setdefault("sensor_filter_mode", "frame_id")
+    if config["sensor_filter_mode"] not in ("frame_id", "object_sensor_id"):
+        raise ValueError("Unsupported sensor filter mode")
+    if config["sensor_filter_mode"] == "object_sensor_id" and not str(config.get("sensor_id", "")).strip():
+        raise ValueError("Object sensor ID filter requires a value")
     mqtt = config.get("mqtt", {})
     mqtt["event_topic"] = "events"
     if not mqtt.get("host") or not mqtt.get("topic"):
@@ -233,6 +242,10 @@ def validate(config, existing=None):
         raise ValueError("Invalid MQTT port")
     if float(config.get("max_gap_sec", 0)) <= 0 or float(config.get("max_jump_m", 0)) <= 0:
         raise ValueError("Track gap and jump limits must be positive")
+    handoff = config.setdefault("handoff", copy.deepcopy(HANDOFF_DEFAULTS))
+    if not isinstance(handoff, dict) or not isinstance(handoff.get("enabled", False), bool):
+        raise ValueError("Invalid track handoff settings")
+    config["handoff"] = {"enabled": handoff.get("enabled", False)}
     geo = config.get("map_alignment", {}).get("geo")
     if geo is not None:
         from math import isfinite
@@ -352,11 +365,22 @@ def validate(config, existing=None):
         if not math.isfinite(debounce) or not 0 <= debounce <= MAX_SUBALERT_DEBOUNCE_SEC:
             raise ValueError("Alert debounce must be between 0 and 3600 seconds")
         mapping["debounce_sec"] = debounce
-        rule = next((rule for rule in config.get("rules", []) if rule["id"] == mapping.get("rule_id")), None)
-        if mapping.get("enabled") and (not rule or rule["type"] not in ("line_crossing", "zone_transition")):
-            raise ValueError("Enabled integration needs a line-crossing or zone-transition rule")
+        raw_ids = mapping.get("rule_ids")
+        if raw_ids is not None and not isinstance(raw_ids, list):
+            raise ValueError("Integration LiDAR rules must be a list")
+        selected_ids = mapping_rule_ids(mapping)
+        if any(not isinstance(rule_id, str) or not rule_id for rule_id in selected_ids):
+            raise ValueError("Integration LiDAR rules must be distinct rule IDs")
+        if len(selected_ids) != len(set(selected_ids)):
+            raise ValueError("Integration LiDAR rules must be distinct rule IDs")
+        available = {rule["id"] for rule in config.get("rules", [])
+                     if rule["type"] in ("line_crossing", "zone_transition")}
+        if mapping.get("enabled") and (not selected_ids or any(rule_id not in available for rule_id in selected_ids)):
+            raise ValueError("Enabled integration needs existing line-crossing or zone-transition rules")
         if mapping.get("enabled") and (not mapping.get("external_rule_id") or not geo):
             raise ValueError("Enabled integration needs an external rule ID and map alignment")
+        mapping["rule_ids"] = selected_ids
+        mapping.pop("rule_id", None)
     return config
 
 
@@ -364,7 +388,8 @@ def process_tracking(engine, payload, client):
     emitted = engine.process(payload)
     integrations = engine.config.get("integrations", {})
     mappings = integrations.get("mappings", [])
-    mapped_ids = {mapping.get("rule_id") for mapping in mappings if mapping.get("enabled")}
+    mapped_ids = {rule_id for mapping in mappings if mapping.get("enabled")
+                  for rule_id in mapping_rule_ids(mapping)}
     config = copy.deepcopy(engine.config) if any(event.get("rule_id") in mapped_ids for event in emitted) else None
     qos = int(engine.config["mqtt"].get("qos", 1))
     header = payload.get("header", {}) if isinstance(payload, dict) else {}
@@ -407,6 +432,7 @@ def on_message(lidar_id, client, userdata, message):
             tracking_topic = engine.config["mqtt"].get("topic")
             source = engine.config.get("source", "Flasheye")
             sensor_filter = engine.config.get("sensor_id", "")
+            filter_mode = engine.config.get("sensor_filter_mode", "frame_id")
             name = engine.config.get("name", "Unnamed LiDAR")
             with processor.admission_lock:
                 generation = processor.generation
@@ -415,8 +441,9 @@ def on_message(lidar_id, client, userdata, message):
         elif message.topic == rse_topic:
             INTEGRATIONS.ingest(lidar_id, "rse", payload, name)
         elif message.topic == tracking_topic:
-            if accepts_tracking(source, payload, sensor_filter):
-                processor.enqueue(payload, client, expected_generation=generation)
+            filtered = filter_tracking(source, payload, sensor_filter, filter_mode)
+            if filtered is not None:
+                processor.enqueue(filtered, client, expected_generation=generation)
             else:
                 processor.record_filtered(source, payload, sensor_filter)
     except Exception as exc:
@@ -577,6 +604,7 @@ class Handler(BaseHTTPRequestHandler):
                 if snapshot["status"]["processing"]["resync_pending"]:
                     snapshot["status"]["tracks"] = 0
                     snapshot["tracks"] = []
+                snapshot["integration_alerts"] = INTEGRATIONS.recent_alerts(parts[2])
             snapshot["integration_catalog"] = INTEGRATIONS.snapshot(parts[2])
             return self.send_json(snapshot)
         self.send_json({"error": "Not found"}, 404)
@@ -652,6 +680,9 @@ class Handler(BaseHTTPRequestHandler):
                 if path[3] == "events-reset":
                     engine.reset_events()
                     return self.send_json({"ok": True})
+                if path[3] == "integration-alerts-reset":
+                    INTEGRATIONS.reset_alerts(lidar_id)
+                    return self.send_json({"ok": True})
                 if path[3] == "tracks-reset":
                     engine.reset_tracks()
                     return self.send_json({"ok": True})
@@ -675,6 +706,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "LiDAR not found"}, 404)
             lidar_file(lidar_id).unlink(missing_ok=True)
             INTEGRATIONS.cancel(lidar_id, clear_debounce=True)
+            INTEGRATIONS.reset_alerts(lidar_id)
             processor = PROCESSORS.pop(lidar_id)
             processor.reset()
             del ENGINES[lidar_id]

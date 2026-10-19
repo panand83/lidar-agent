@@ -31,9 +31,9 @@ integrationModal.innerHTML = `<form class="modalBox integrationModalBox" id="int
   <h2 id="integrationModalTitle">Alert mapping</h2>
   <label>Use case<select id="integrationUseCase"><option value="wrongway_vehicle">Wrong-way vehicle</option></select></label>
   <label>Zone type<select id="integrationZone"><option value="1">Detection Zone</option><option value="3">Confirmation Zone</option></select></label>
-  <label>LiDAR rule<select id="integrationLocalRule" required></select></label>
+  <fieldset class="integrationRuleField"><legend>LiDAR rules (any)</legend><div id="integrationLocalRules" class="integrationRuleChoices"></div></fieldset>
   <label>External rule<select id="integrationExternalRule" required></select></label>
-  <label>Subalert debounce (s)<input id="integrationDebounce" type="number" min="0" max="3600" step="0.1" value="0" required></label>
+  <label title="Suppresses new subalerts and warning-device actions for this mapping across all selected LiDAR rules. Source events are unaffected.">Subalert debounce (s)<input id="integrationDebounce" type="number" min="0" max="3600" step="0.1" value="0" required></label>
   <label class="toggleControl"><input id="integrationEnabled" type="checkbox"><span class="toggleTrack" aria-hidden="true"></span><span class="toggleText">Disabled</span></label>
   <div class="row"><button type="button" id="cancelIntegration">Cancel</button><button type="submit" class="primary" id="confirmIntegration">Add mapping</button></div>
 </form>`;
@@ -47,6 +47,32 @@ function closeIntegrationModal() {
   editingIntegrationId = null;
   integrationModalLidarId = null;
   integrationModalFocus?.focus();
+}
+
+function integrationRuleIds(mapping) {
+  return mapping?.rule_ids ?? (mapping?.rule_id ? [mapping.rule_id] : []);
+}
+
+function renderIntegrationRuleChoices(mapping) {
+  const selected = new Set(integrationRuleIds(mapping));
+  const choices = $('integrationLocalRules');
+  choices.replaceChildren();
+  const local = (state.config.rules || []).filter(rule => ['line_crossing', 'zone_transition'].includes(rule.type));
+  for (const rule of local) {
+    const label = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = rule.id;
+    input.checked = selected.has(rule.id);
+    label.append(input, document.createTextNode(rule.name));
+    choices.append(label);
+  }
+  for (const missing of selected) {
+    if (local.some(rule => rule.id === missing)) continue;
+    const label = document.createElement('label');
+    label.textContent = `Missing rule (${missing})`;
+    choices.append(label);
+  }
 }
 
 function openIntegrationModal(mapping = null) {
@@ -64,14 +90,12 @@ function openIntegrationModal(mapping = null) {
     $('integrationEnabled').closest('.toggleControl').querySelector('.toggleText').textContent = $('integrationEnabled').checked ? 'Enabled' : 'Disabled';
   };
   $('integrationDebounce').value = mapping?.debounce_sec ?? 0;
-  const local = (state.config.rules || []).filter(rule => ['line_crossing', 'zone_transition'].includes(rule.type))
-    .map(rule => [rule.id, rule.name]);
   const external = Object.values(state.snapshot?.integration_catalog?.rules || {})
     .map(rule => [rule.id, rule.name || rule.id]);
-  fillIntegrationSelect($('integrationLocalRule'), [['', 'Select LiDAR rule'], ...local], mapping?.rule_id);
+  renderIntegrationRuleChoices(mapping);
   fillIntegrationSelect($('integrationExternalRule'), [['', 'Select external rule'], ...external], mapping?.external_rule_id);
   integrationModal.hidden = false;
-  $('integrationLocalRule').focus();
+  $('integrationLocalRules').querySelector('input')?.focus();
 }
 
 $('cancelIntegration').onclick = closeIntegrationModal;
@@ -92,11 +116,19 @@ $('integrationForm').onsubmit = event => {
     message('Subalert debounce must be between 0 and 3600 seconds');
     return;
   }
+  const ruleIds = [...$('integrationLocalRules').querySelectorAll('input:checked')].map(input => input.value);
+  if (!ruleIds.length) {
+    message('Select at least one LiDAR rule');
+    return;
+  }
   const mapping = config.mappings.find(item => item.id === editingIntegrationId);
   const values = {enabled: $('integrationEnabled').checked, use_case: $('integrationUseCase').value,
-    zone: Number($('integrationZone').value), rule_id: $('integrationLocalRule').value,
+    zone: Number($('integrationZone').value), rule_ids: ruleIds,
     external_rule_id: $('integrationExternalRule').value, debounce_sec: debounce};
-  if (mapping) Object.assign(mapping, values);
+  if (mapping) {
+    Object.assign(mapping, values);
+    delete mapping.rule_id;
+  }
   else config.mappings.push({id: uid('integration'), ...values});
   closeIntegrationModal();
   dirty();
@@ -120,7 +152,7 @@ function renderIntegrationFields() {
   const receipt = kind => status[`${kind}_refresh_pending`] ? `${kind.toUpperCase()}: waiting for broadcast` :
     status[`${kind}_received_at`] ? `${kind.toUpperCase()}: received ${new Date(status[`${kind}_received_at`]).toLocaleString()}` :
       `${kind.toUpperCase()}: waiting for first broadcast`;
-  $('integrationStatus').textContent = `${Object.keys(rules).length} external rules, ${Object.keys(devices).length} devices | ${receipt('rule')} | ${receipt('rse')}${status.last_subalert ? ` | last subalert ${status.last_subalert}` : ''}${status.error ? ` | ${status.error}` : ''}`;
+  $('integrationStatus').textContent = `${Object.keys(rules).length} external rules, ${Object.keys(devices).length} devices | ${receipt('rule')} | ${receipt('rse')}${status.last_subalert ? ` | last subalert ${status.last_subalert}` : ''}${status.subalerts_debounced ? ` | ${status.subalerts_debounced} debounced` : ''}${status.error ? ` | ${status.error}` : ''}`;
   const root = $('integrationList');
   root.replaceChildren();
   if (!config.mappings?.length) {
@@ -137,7 +169,7 @@ function renderIntegrationFields() {
     const identity = document.createElement('div');
     identity.className = 'integrationIdentity';
     const title = document.createElement('strong');
-    title.textContent = `Wrong-way vehicle | ${mapping.zone === 3 ? 'Confirmation Zone' : 'Detection Zone'}`;
+    title.textContent = integrationMappingTitle(mapping.zone);
     const stateLabel = document.createElement('span');
     stateLabel.className = `integrationState ${mapping.enabled ? 'isEnabled' : 'isDisabled'}`;
     stateLabel.textContent = mapping.enabled ? 'Enabled' : 'Disabled';
@@ -160,11 +192,11 @@ function renderIntegrationFields() {
     actions.append(edit, remove);
     heading.append(identity, actions);
     row.append(heading);
-    const localRule = (state.config.rules || []).find(rule => rule.id === mapping.rule_id);
+    const localRules = integrationRuleIds(mapping).map(id => (state.config.rules || []).find(rule => rule.id === id)?.name || 'Missing LiDAR rule');
     const external = rules[mapping.external_rule_id];
     const route = document.createElement('div');
     route.className = 'integrationRoute';
-    route.textContent = `${localRule?.name || 'Missing LiDAR rule'} -> ${external?.name || 'Missing external rule'} | ${mapping.debounce_sec || 0}s debounce`;
+    route.textContent = `${localRules.join(' OR ') || 'No LiDAR rules'} -> ${external?.name || 'Missing external rule'} | ${mapping.debounce_sec || 0}s debounce`;
     row.append(route);
     const assigned = (external?.lights || []).filter(light => String(light.zoneId) === String(mapping.zone));
     const deviceIds = assigned.flatMap(light => [light.flasherId, light.illuminatorId].filter(Boolean));

@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
 const canvas = $('scene'), ctx = canvas.getContext('2d');
-const state = {lidars: [], id: null, snapshot: null, live: null, liveEvents: [], eventCursor: null, config: null, tab: 'rules', mode: 'pan', selectedRegion: null, selectedRule: null, draft: [], bounds: [-20, -20, 150, 40], dirty: false, alertSeen: null, ruleAlertUntil: new Map(), geometryAlertUntil: new Map()};
+const state = {lidars: [], id: null, snapshot: null, live: null, liveEvents: [], eventCursor: null, config: null, tab: 'rules', mode: 'pan', selectedRegion: null, selectedRule: null, draft: [], bounds: [-20, -20, 150, 40], dirty: false, alertSeen: null, ruleAlertUntil: new Map(), geometryAlertUntil: new Map(), occupancyDisplay: new Map(), occupancyInitialized: false};
 const markerSvgs = {
   car: `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 100 160" fill="none">
   <rect x="12" y="31" width="9" height="20" rx="4" fill="#253854"/>
@@ -113,6 +113,13 @@ function switchControl(checked, label, onChange){
   return control;
 }
 async function setAgentEnabled(id,enabled,input){
+  const name=state.lidars.find(item=>item.id===id)?.name||state.config?.name||id;
+  const prompt=enabled?`Enable ${name}? Tracking and rule execution will start.`:`Disable ${name}? Tracking and rule execution will stop.`;
+  if(!confirm(prompt)){
+    input.checked=!enabled;
+    input.closest('.toggleControl').querySelector('.toggleText').textContent=enabled?'Disabled':'Enabled';
+    return;
+  }
   input.disabled=true;
   let saved=false;
   try{
@@ -179,7 +186,7 @@ async function loadList(){
   });
   if(rows.length!==root.children.length||rows.some((row,index)=>root.children[index]!==row))root.replaceChildren(...rows);
 }
-async function select(id, discardConfirmed=false){if(state.id!==id&&state.dirty&&!discardConfirmed&&!confirm('Discard unsaved changes to this LiDAR?'))return false;state.id=id;state.snapshot=null;state.live=null;state.liveEvents=[];state.eventCursor=null;state.alertSeen=null;state.ruleAlertUntil=new Map();state.geometryAlertUntil=new Map();clean();state.selectedRegion=null;state.selectedRule=null;state.draft=[];await refresh();mode('pan');await loadList();setTab(state.tab);return true}
+async function select(id, discardConfirmed=false){if(state.id!==id&&state.dirty&&!discardConfirmed&&!confirm('Discard unsaved changes to this LiDAR?'))return false;state.id=id;state.snapshot=null;state.live=null;state.liveEvents=[];state.eventCursor=null;state.alertSeen=null;state.ruleAlertUntil=new Map();state.geometryAlertUntil=new Map();state.occupancyDisplay=new Map();state.occupancyInitialized=false;clean();state.selectedRegion=null;state.selectedRule=null;state.draft=[];await refresh();mode('pan');await loadList();setTab(state.tab);return true}
 function eventGeometryIds(event){
   const explicit=[...(event.line_region_ids||[]),event.line_region_id,event.region_id].filter(Boolean);
   if(explicit.length)return [...new Set(explicit)];
@@ -187,7 +194,7 @@ function eventGeometryIds(event){
   return [...(rule?.line_region_ids||[]),rule?.region_id].filter(Boolean);
 }
 function updateRuleAlerts(){
-  const events=state.snapshot?.events||[];
+  const events=[...(state.snapshot?.events||[]),...(state.snapshot?.occupancy_events||[])];
   if(state.alertSeen===null){state.alertSeen=new Set(events.map(event=>event.event_id).filter(Boolean));}
   else{
     const now=Date.now();
@@ -226,7 +233,11 @@ function applyLiveSnapshot(live){
   }
   const snap=state.snapshot;
   if(snap&&live.events?.length)mergeLiveEvents(snap);
-  if(!snap||!live||!live.status.last_received||live.status.last_received<(snap.status.last_received||0))return;
+  if(!snap||!live||!live.status.last_received||live.status.last_received<(snap.status.last_received||0))return false;
+  const previousOccupancy=new Map((snap.occupancy_events||[]).map(event=>[event.rule_id,event.event_id]));
+  const occupancyEvents=live.occupancy_events||[];
+  const occupancyChanged=occupancyEvents.length!==previousOccupancy.size||occupancyEvents.some(event=>previousOccupancy.get(event.rule_id)!==event.event_id);
+  snap.occupancy_events=occupancyEvents;
   const previous=new Map(snap.tracks.map(track=>[trackIdentity(track),track]));
   snap.tracks=live.tracks.map(head=>{
     const old=previous.get(trackIdentity(head));
@@ -237,6 +248,7 @@ function applyLiveSnapshot(live){
     return {...head,points};
   });
   Object.assign(snap.status,live.status);
+  return occupancyChanged;
 }
 function applyFullSnapshot(snap){
   state.snapshot=snap;
@@ -245,16 +257,28 @@ function applyFullSnapshot(snap){
   if(state.live)applyLiveSnapshot(state.live);
 }
 async function refresh(){if(!state.id)return;const id=state.id,snap=await api(path());if(state.id!==id)return;applyFullSnapshot(snap);if(!state.dirty)state.config=structuredClone(snap.config);$('empty').hidden=true;renderFields();updateRuleAlerts();renderCanvas();renderStatus()}
-function setTab(tab){state.tab=tab;document.querySelectorAll('nav [data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));for(const name of ['lidar','mqtt','map','calibration','geometry','rules','integrations','events','scene'])$(name+'Panel').hidden=name!==tab;renderFields();renderCanvas()}
+function setTab(tab){state.tab=tab;document.querySelectorAll('nav [data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));for(const name of ['lidar','mqtt','map','calibration','geometry','rules','integrations','events','integrationAlerts','scene'])$(name+'Panel').hidden=name!==tab;renderFields();renderCanvas()}
 document.querySelectorAll('nav [data-tab]').forEach(button => {
   button.addEventListener('click', () => {
     if (state.config) setTab(button.dataset.tab);
   });
 });
 function val(id){return $(id).value}function num(id){return Number(val(id))}function csv(id){return val(id).split(',').map(x=>x.trim()).filter(Boolean)}
-function renderFields(){const c=state.config;if(!c)return;$('lidarName').value=c.name;$('lidarId').value=c.id;$('trackingSource').value=c.source||'Flasheye';$('sensorId').value=c.sensor_id||'';$('enabled').checked=c.enabled!==false;$('enabled').closest('.toggleControl').querySelector('.toggleText').textContent=c.enabled!==false?'Enabled':'Disabled';$('maxGap').value=c.max_gap_sec;$('maxJump').value=c.max_jump_m;for(const [id,key] of [['mqttHost','host'],['mqttPort','port'],['mqttTopic','topic'],['mqttUser','username'],['mqttPassword','password'],['mqttEventTopic','event_topic'],['mqttQos','qos']])$(id).value=c.mqtt[key]??'';renderGeometryList();renderRuleList();renderControls();renderEvents();$('sceneSummary').textContent=`${c.regions.length} geometries · ${c.rules.length} rules · ${state.snapshot?.status.tracks||0} active tracks`}
+function renderFields(){const c=state.config;if(!c)return;$('lidarName').value=c.name;$('lidarId').value=c.id;$('trackingSource').value=c.source||'Flasheye';$('sensorFilterMode').value=c.sensor_filter_mode||'frame_id';$('sensorId').value=c.sensor_id||'';$('sensorId').placeholder=c.sensor_filter_mode==='object_sensor_id'?'Required object sensor_id':'All frames on this topic';$('enabled').checked=c.enabled!==false;$('enabled').closest('.toggleControl').querySelector('.toggleText').textContent=c.enabled!==false?'Enabled':'Disabled';$('maxGap').value=c.max_gap_sec;$('maxJump').value=c.max_jump_m;for(const [id,key] of [['mqttHost','host'],['mqttPort','port'],['mqttTopic','topic'],['mqttUser','username'],['mqttPassword','password'],['mqttEventTopic','event_topic'],['mqttQos','qos']])$(id).value=c.mqtt[key]??'';renderGeometryList();renderRuleList();renderControls();renderEvents();renderIntegrationAlerts();$('sceneSummary').textContent=`${c.regions.length} geometries · ${c.rules.length} rules · ${state.snapshot?.status.tracks||0} active tracks`}
+function renderHandoff(){
+  if(!state.config)return;
+  const h=state.config.handoff||{enabled:false};
+  $('handoffEnabled').checked=!!h.enabled;
+  const globalMode=state.snapshot?.status?.handoff_mode||'off';
+  $('handoffMode').textContent=`Global mode: ${{off:'Off',observe:'Observe (log only)',on:'On'}[globalMode]||globalMode}`;
+  $('handoffMode').title='Set KLA_TRACK_HANDOFF_MODE in the server environment and restart. Observe logs proposals without changing events.';
+}
+const handoffBaseRenderFields=renderFields;
+renderFields=function(){handoffBaseRenderFields();renderHandoff()};
 function bind(id,action){$(id).addEventListener('change',()=>{if(!state.config)return;action();dirty();renderFields()})}
-bind('lidarName',()=>state.config.name=val('lidarName'));bind('trackingSource',()=>state.config.source=val('trackingSource'));bind('sensorId',()=>state.config.sensor_id=val('sensorId'));$('enabled').onchange=event=>{if(state.id)setAgentEnabled(state.id,event.target.checked,event.target)};bind('maxGap',()=>state.config.max_gap_sec=num('maxGap'));bind('maxJump',()=>state.config.max_jump_m);
+bind('lidarName',()=>state.config.name=val('lidarName'));bind('trackingSource',()=>state.config.source=val('trackingSource'));bind('sensorFilterMode',()=>state.config.sensor_filter_mode=val('sensorFilterMode'));bind('sensorId',()=>state.config.sensor_id=val('sensorId'));$('enabled').onchange=event=>{if(state.id)setAgentEnabled(state.id,event.target.checked,event.target)};bind('maxGap',()=>state.config.max_gap_sec=num('maxGap'));bind('maxJump',()=>state.config.max_jump_m);
+function handoffSettings(){return state.config.handoff??={enabled:false}}
+bind('handoffEnabled',()=>handoffSettings().enabled=$('handoffEnabled').checked);
 for(const [id,key] of [['mqttHost','host'],['mqttPort','port'],['mqttTopic','topic'],['mqttUser','username'],['mqttPassword','password'],['mqttEventTopic','event_topic'],['mqttQos','qos']])bind(id,()=>state.config.mqtt[key]=['port','qos'].includes(key)?num(id):val(id));
 function selectedRegion(){return state.config?.regions.find(r=>r.id===state.selectedRegion)}
 function selectedRule(){return state.config?.rules.find(r=>r.id===state.selectedRule)}
@@ -275,14 +299,72 @@ for(const [id,key,convert] of [['ruleName','name',val],['ruleType','type',val],[
 bind('ruleEnabled',()=>selectedRule().enabled=$('ruleEnabled').checked);$('deleteRule').onclick=()=>{state.config.rules=state.config.rules.filter(r=>r.id!==state.selectedRule);state.selectedRule=null;dirty();renderFields()};
 function renderControls(){const points=state.config?.map_alignment?.control_points||[];$('controlList').replaceChildren(...points.map((p,i)=>{const row=document.createElement('div');row.className='controlRow';for(const [key,title] of [['x','X (m)'],['y','Y (m)'],['lat','Latitude'],['lon','Longitude']]){const label=document.createElement('label');label.textContent=title;const input=document.createElement('input');input.type='number';input.step='any';input.value=p[key]??'';input.onchange=()=>{p[key]=input.value===''?null:Number(input.value);dirty()};label.append(input);row.append(label)}const del=document.createElement('button');del.textContent='Remove';del.onclick=()=>{points.splice(i,1);dirty();renderControls()};row.append(del);return row}))}
 $('addControlRow').onclick=()=>{state.config.map_alignment.control_points.push({x:null,y:null,lat:null,lon:null});dirty();renderControls()};
-function renderEvents(){const events=state.snapshot?.events||[];$('eventsList').replaceChildren(...events.slice(0,50).map(e=>{const div=document.createElement('div');div.className='event';const strong=document.createElement('strong');strong.textContent=e.rule_name||e.event_type;div.append(strong,document.createTextNode(`${e.event_type} · ${e.direction||e.count+' objects'} · ${new Date(e.timestamp*1000).toLocaleTimeString()}`));return div}))}
+function renderEvents(){
+  const events=[...(state.snapshot?.events||[]),...(state.snapshot?.occupancy_events||[])];
+  const latestOccupancy=new Map();
+  for(const event of events){
+    if(event.event_type!=='occupancy')continue;
+    const key=event.rule_id||event.rule_name;
+    if(!latestOccupancy.has(key)||event.timestamp>latestOccupancy.get(key).timestamp)latestOccupancy.set(key,event);
+  }
+  const typeNames={line_crossing:'Line crossing',zone_transition:'Zone transition',occupancy:'Zone occupancy'};
+  const visibleEvents=events.filter(event=>event.event_type!=='occupancy'||latestOccupancy.get(event.rule_id||event.rule_name)===event).sort((a,b)=>b.timestamp-a.timestamp);
+  const rows=visibleEvents.slice(0,50).map(event=>{
+    const row=document.createElement('div');row.className='event integrationAlert recentEvent';
+    if(event.event_type==='occupancy'){
+      const key=event.rule_id||event.rule_name;
+      const version=event.event_id||`${event.timestamp}:${event.count}`;
+      const previous=state.occupancyDisplay.get(key);
+      const until=state.occupancyInitialized&&(!previous||previous.version!==version)?Date.now()+1500:previous?.until||0;
+      state.occupancyDisplay.set(key,{version,until});
+      if(until>Date.now()){
+        row.classList.add('occupancyUpdated');
+        setTimeout(()=>row.classList.remove('occupancyUpdated'),until-Date.now());
+      }
+    }
+    const identity=document.createElement('div');identity.className='integrationAlertIdentity';
+    const rule=document.createElement('strong');rule.textContent=event.rule_name||'Unnamed rule';rule.title=rule.textContent;
+    const object=document.createElement('small');object.textContent=event.track_id!=null?`Object ${event.track_id}`:`${event.count??0} objects`;
+    const timing=document.createElement('div');timing.className='integrationAlertTiming';
+    const time=document.createElement('time');time.dateTime=new Date(event.timestamp*1000).toISOString();time.textContent=new Date(event.timestamp*1000).toLocaleTimeString();
+    const description=document.createElement('small');description.textContent=[typeNames[event.event_type]||event.event_type,event.direction].filter(Boolean).join(' | ');
+    identity.append(rule,object);timing.append(time,description);row.append(identity,timing);return row;
+  });
+  if(!rows.length){const empty=document.createElement('p');empty.className='muted';empty.textContent='No recent events';rows.push(empty)}
+  $('eventsList').replaceChildren(...rows);
+  state.occupancyInitialized=true;
+}
+function integrationMappingTitle(zone){return `Wrong-way vehicle | ${Number(zone)===3?'Confirmation Zone':'Detection Zone'}`}
+function renderIntegrationAlerts(){
+  const alerts=state.snapshot?.integration_alerts||[];
+  const rows=alerts.slice(0,50).map(alert=>{
+    const row=document.createElement('div');row.className='event integrationAlert';
+    row.title=`External rule: ${alert.external_rule_name||'Unavailable'}\nZone: ${alert.zone}\nTopic: ${alert.topic||'Unavailable'}`;
+    const identity=document.createElement('div');identity.className='integrationAlertIdentity';
+    const vehicle=document.createElement('strong');vehicle.textContent=alert.vehicle_id||'Unavailable';vehicle.title=vehicle.textContent;
+    const mapping=document.createElement('small');mapping.textContent=integrationMappingTitle(alert.zone);
+    const timing=document.createElement('div');timing.className='integrationAlertTiming';
+    const time=document.createElement('time');time.dateTime=alert.timestamp;time.textContent=new Date(alert.timestamp).toLocaleTimeString();
+    const source=document.createElement('small');source.textContent=alert.rule_name||'Unnamed rule';
+    identity.append(vehicle,mapping);timing.append(time,source);row.append(identity,timing);return row;
+  });
+  if(!rows.length){const empty=document.createElement('p');empty.className='muted';empty.textContent='No generated integration alerts';rows.push(empty)}
+  $('integrationAlertsList').replaceChildren(...rows);
+}
+$('resetIntegrationAlerts').onclick=async()=>{
+  if(!state.id||!confirm('Clear recent integration alerts for this LiDAR?'))return;
+  try{await api(path()+'/integration-alerts-reset','POST',{});if(state.snapshot)state.snapshot.integration_alerts=[];renderIntegrationAlerts();message('Recent integration alerts cleared')}
+  catch(error){message(error.message)}
+};
 $('resetEvents').onclick = async () => {
   if (!state.id || !confirm('Clear recent events for this LiDAR?')) return;
   try {
     await api(path() + '/events-reset', 'POST', {});
     state.live=null;
     state.liveEvents=[];
-    if (state.snapshot) state.snapshot.events = [];
+    state.eventCursor=null;
+    state.occupancyDisplay.clear();
+    if (state.snapshot){state.snapshot.events=[];state.snapshot.occupancy_events=[];}
     renderEvents();
     renderCanvas();
     message('Recent events cleared');
@@ -436,7 +518,7 @@ downloadLidarConfig.onclick=async()=>{
     setTimeout(()=>URL.revokeObjectURL(url),1000);
   }catch(error){message(error.message)}
 };
-$('deleteLidar').onclick=async()=>{if(!state.id||!confirm('Delete this LiDAR agent and its saved configuration?'))return;try{await api(path(),'DELETE');state.id=null;state.config=null;state.snapshot=null;state.live=null;state.liveEvents=[];state.eventCursor=null;state.ruleAlertUntil=new Map();state.geometryAlertUntil=new Map();clean();mode('pan');await loadList();$('empty').hidden=false;for(const name of ['lidar','mqtt','map','calibration','geometry','rules','integrations','events','scene'])$(name+'Panel').hidden=true;renderCanvas()}catch(e){message(e.message)}};
+$('deleteLidar').onclick=async()=>{if(!state.id||!confirm('Delete this LiDAR agent and its saved configuration?'))return;try{await api(path(),'DELETE');state.id=null;state.config=null;state.snapshot=null;state.live=null;state.liveEvents=[];state.eventCursor=null;state.ruleAlertUntil=new Map();state.geometryAlertUntil=new Map();clean();mode('pan');await loadList();$('empty').hidden=false;for(const name of ['lidar','mqtt','map','calibration','geometry','rules','integrations','events','integrationAlerts','scene'])$(name+'Panel').hidden=true;renderCanvas()}catch(e){message(e.message)}};
 function fit(){const points=[...visibleTracks().flatMap(t=>t.points),...(state.config?.regions||[]).flatMap(r=>r.points)];if(!points.length){state.bounds=[-20,-20,150,40];renderCanvas();return}let xs=points.map(p=>p[0]),ys=points.map(p=>p[1]);let minx=Math.min(...xs),maxx=Math.max(...xs),miny=Math.min(...ys),maxy=Math.max(...ys);let pad=Math.max(5,(maxx-minx+maxy-miny)*.08);state.bounds=[minx-pad,miny-pad,maxx+pad,maxy+pad];renderCanvas()}$('fit').onclick=fit;
 function resize(){const rect=canvas.getBoundingClientRect(),scale=devicePixelRatio||1;canvas.width=Math.max(1,Math.round(rect.width*scale));canvas.height=Math.max(1,Math.round(rect.height*scale));renderCanvas()}new ResizeObserver(resize).observe(canvas);
 function screen(p){const [x0,y0,x1,y1]=state.bounds;const scale=Math.min(canvas.width/(x1-x0),canvas.height/(y1-y0))*.9;return [canvas.width/2+(p[0]-(x0+x1)/2)*scale,canvas.height/2-(p[1]-(y0+y1)/2)*scale]}
@@ -453,7 +535,7 @@ function finishDraft(){if(!state.config)return;const m=state.mode,d=state.draft;
 window.addEventListener('keydown',e=>{if(e.key==='Escape'){state.draft=[];mode('pan')}});
 let nextAgentListPoll=0;
 async function poll(){
-  if(state.id){try{const id=state.id,snap=await api(path());if(state.id===id){applyFullSnapshot(snap);updateRuleAlerts();renderCanvas();renderStatus();renderEvents();$('sceneSummary').textContent=`${state.config?.regions.length||0} geometries · ${state.config?.rules.length||0} rules · ${state.snapshot.status.tracks} active tracks`}}catch(e){message(e.message)}}
+  if(state.id){try{const id=state.id,snap=await api(path());if(state.id===id){applyFullSnapshot(snap);updateRuleAlerts();renderCanvas();renderStatus();renderEvents();renderIntegrationAlerts();$('sceneSummary').textContent=`${state.config?.regions.length||0} geometries · ${state.config?.rules.length||0} rules · ${state.snapshot.status.tracks} active tracks`}}catch(e){message(e.message)}}
   if(Date.now()>=nextAgentListPoll){nextAgentListPoll=Date.now()+3000;await loadList().catch(()=>{})}
   setTimeout(poll,2000);
 }
@@ -461,7 +543,7 @@ async function pollLive(){
   let delay=100;
   if(state.id&&state.snapshot){
     const id=state.id;
-    try{const live=await api('/api/lidars/'+encodeURIComponent(id)+'/live'+(state.eventCursor?'?after='+encodeURIComponent(state.eventCursor):''));if(state.id===id){applyLiveSnapshot(live);updateRuleAlerts();renderCanvas();renderStatus();if(live.events?.length)renderEvents()}}
+    try{const live=await api('/api/lidars/'+encodeURIComponent(id)+'/live'+(state.eventCursor?'?after='+encodeURIComponent(state.eventCursor):''));if(state.id===id){const occupancyChanged=applyLiveSnapshot(live);updateRuleAlerts();renderCanvas();renderStatus();if(live.events?.length||occupancyChanged)renderEvents()}}
     catch(e){message(e.message);delay=1000}
   }
   setTimeout(pollLive,delay);

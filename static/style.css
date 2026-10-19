@@ -23,6 +23,14 @@ canvas.editing { cursor: crosshair; }
 #calibrationNext:disabled{opacity:.55;cursor:default}
 #captureStatus,#mapResult{color:var(--yellow);font-size:12px;line-height:1.4;margin:9px 0}
 .integrationRow { padding: 14px 0; border-bottom: 1px solid var(--border); }
+.integrationAlert { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: 8px; line-height: 1.4; }
+.integrationAlertIdentity,.integrationAlertTiming { min-width: 0; }
+.integrationAlertIdentity strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.integrationAlertTiming { text-align: right; }
+.integrationAlertTiming time { display: block; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.integrationAlertIdentity small,.integrationAlertTiming small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.recentEvent .integrationAlertIdentity strong { white-space: normal; overflow-wrap: anywhere; }
+.recentEvent.occupancyUpdated .integrationAlertIdentity small,.recentEvent.occupancyUpdated .integrationAlertTiming time { display: inline-block; background: var(--yellow); color: var(--bg); border-radius: 3px; padding: 1px 3px; font-weight: 700; }
 .integrationRow .panelHeading { margin-bottom: 8px; }
 .integrationRow .panelHeading strong { font-size: 13px; }
 .integrationDetail, #integrationStatus { color: var(--muted); font-size: 12px; line-height: 1.4; margin: 10px 0; overflow-wrap: anywhere; }
@@ -37,6 +45,11 @@ canvas.editing { cursor: crosshair; }
 .integrationRoute { color: var(--text); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 .integrationModalBox { width: min(430px, calc(100vw - 30px)); max-height: calc(100vh - 30px); overflow: auto; }
 .integrationModalBox .row { justify-content: flex-end; margin-bottom: 0; }
+.integrationRuleField { border: 0; border-top: 1px solid var(--border); padding: 10px 0 0; margin: 12px 0; min-width: 0; }
+.integrationRuleField legend { color: var(--muted); font-size: 12px; padding-right: 8px; }
+.integrationRuleChoices { display: grid; gap: 8px; max-height: 180px; overflow-y: auto; }
+.integrationRuleChoices label { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text); font-size: 13px; }
+.integrationRuleChoices input { margin: 0; flex: 0 0 auto; }
 @media (min-width: 1051px) { .layout { grid-template-columns: 260px minmax(420px, 1fr) 430px; } }
 @media (min-width: 761px) and (max-width: 1050px) { .layout { grid-template-columns: 190px minmax(300px, 1fr) 340px; } }
 .toggleControl { position: relative; display: inline-flex; align-items: center; width: 38px; height: 29px; flex: 0 0 38px; margin: 0; cursor: pointer; }
@@ -48,6 +61,8 @@ canvas.editing { cursor: crosshair; }
 .toggleControl input:checked + .toggleTrack::after { transform: translateX(16px); }
 .toggleControl input:focus-visible + .toggleTrack { outline: 2px solid #fff; outline-offset: 2px; }
 .toggleControl input:disabled + .toggleTrack { opacity: .5; }
+#lidarPanel .toggleControl:has(#handoffEnabled) { width: auto; gap: 9px; }
+#handoffEnabled ~ .toggleText { position: static; width: auto; height: auto; overflow: visible; clip-path: none; color: var(--text); font-size: 12px; }
 .agentRow { display: flex; align-items: center; gap: 10px; min-height: 58px; padding: 9px 11px; margin: 0 0 7px; background: #101d3e; border: 1px solid var(--border); border-radius: 6px; }
 .agentRow.active { outline: 2px solid #7aa0ff; }
 .agentSelect { min-width: 0; flex: 1; padding: 0; text-align: left; background: none; border: 0; }

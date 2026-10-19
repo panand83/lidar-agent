@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from collections import deque
 import heapq
 import ipaddress
 import json
@@ -21,6 +22,14 @@ QUEUE_LIMIT = 512
 MAX_SUBALERT_DEBOUNCE_SEC = 3600
 VEHICLE_CLASSES = {"car", "truck", "bus", "motorcycle"}
 VEHICLE_ID_EPOCH_MS = 1735689600000  # 2025-01-01 00:00:00 UTC
+
+
+def mapping_rule_ids(mapping):
+    ids = mapping.get("rule_ids")
+    if ids is not None:
+        return ids if isinstance(ids, list) else []
+    legacy_id = mapping.get("rule_id")
+    return [legacy_id] if legacy_id else []
 
 
 def job_log_context(job):
@@ -150,6 +159,7 @@ class IntegrationService:
         self.generations = {}
         self.subalert_debounce = {}
         self.debounce_expirations = []
+        self.alerts = {}
         self.started = False
         if start_workers:
             self.start()
@@ -185,6 +195,14 @@ class IntegrationService:
             return {"rules": copy.deepcopy(catalog.get("rule", {})),
                     "devices": copy.deepcopy(catalog.get("rse", {})),
                     "status": copy.deepcopy(self.status.get(lidar_id, {}))}
+
+    def recent_alerts(self, lidar_id):
+        with self.condition:
+            return list(self.alerts.get(lidar_id, ()))
+
+    def reset_alerts(self, lidar_id):
+        with self.condition:
+            self.alerts.pop(lidar_id, None)
 
     def request_refresh(self, lidar_id, kinds):
         with self.condition:
@@ -244,7 +262,7 @@ class IntegrationService:
             self.lidar_names[lidar_id] = lidar_name
             catalog = copy.deepcopy(self.catalog.get(lidar_id, {}))
         for mapping in integrations.get("mappings", []):
-            if not mapping.get("enabled") or mapping.get("rule_id") != event.get("rule_id"):
+            if not mapping.get("enabled") or event.get("rule_id") not in mapping_rule_ids(mapping):
                 continue
             rule = catalog.get("rule", {}).get(mapping.get("external_rule_id"))
             if not rule or not rule["active"]:
@@ -267,12 +285,18 @@ class IntegrationService:
                 debounce_sec = float(mapping.get("debounce_sec", 0))
                 debounce_key = (lidar_id, mapping["id"])
                 last = self.subalert_debounce.get(debounce_key)
-                if last is not None and now - last < debounce_sec:
+                if debounce_sec > 0 and last is not None and now - last < debounce_sec:
+                    status = self.status.setdefault(lidar_id, {})
+                    status["subalerts_debounced"] = status.get("subalerts_debounced", 0) + 1
+                    status["last_debounce_skip_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                     LOG.info("Subalert skipped rule_name=%s vehicle_id=%s lidar=%s reason=debounce remaining_sec=%.2f",
                              rule_name, payload["vehicleId"], lidar_name, debounce_sec - (now - last))
                     continue
-                self.subalert_debounce[debounce_key] = now
-                heapq.heappush(self.debounce_expirations, (now + MAX_SUBALERT_DEBOUNCE_SEC, debounce_key, now))
+                if debounce_sec > 0:
+                    self.subalert_debounce[debounce_key] = now
+                    heapq.heappush(self.debounce_expirations, (now + debounce_sec, debounce_key, now))
+                else:
+                    self.subalert_debounce.pop(debounce_key, None)
                 generation = self.generations.get(lidar_id, 0)
             devices = catalog.get("rse", {})
             for light in rule["lights"]:
@@ -297,6 +321,12 @@ class IntegrationService:
                            "expires": now + JOB_TTL_SEC, "client": mqtt_client,
                            "topic": integrations.get("subalert_topic", "subalert"),
                            "qos": int(config["mqtt"].get("qos", 1)), "payload": json.dumps(payload)})
+            with self.condition:
+                self.alerts.setdefault(lidar_id, deque(maxlen=200)).appendleft({
+                    "timestamp": payload["timestamp"], "rule_name": rule_name,
+                    "source_event_id": event.get("event_id"), "event_id": payload["eventId"],
+                    "vehicle_id": payload["vehicleId"], "external_rule_name": rule["name"],
+                    "zone": mapping["zone"], "topic": integrations.get("subalert_topic", "subalert")})
             self._record(lidar_id, last_subalert=payload["timestamp"], error="")
             LOG.info("Subalert generated rule_name=%s vehicle_id=%s lidar=%s external_rule=%s zone=%s topic=%s",
                      rule_name, payload["vehicleId"], lidar_name,

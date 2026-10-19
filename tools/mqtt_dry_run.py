@@ -35,12 +35,16 @@ def main():
     parser.add_argument("--topic", help="Read-only topic override, including MQTT wildcards")
     args = parser.parse_args()
     settings = env_values(ROOT / ".env.kla.qa")
-    agents = {}
+    frame_agents = defaultdict(list)
+    sensor_agents = defaultdict(list)
     configs = []
     for path in sorted((ROOT / "data" / "lidars").glob("*.json")):
         config = json.loads(path.read_text(encoding="utf-8"))
         configs.append(config)
-        agents[str(config.get("sensor_id", ""))] = config.get("name", path.stem)
+        sensor_filter = str(config.get("sensor_id", ""))
+        if sensor_filter:
+            agents = sensor_agents if config.get("sensor_filter_mode") == "object_sensor_id" else frame_agents
+            agents[sensor_filter].append(config.get("name", path.stem))
     selected = next((item for item in configs if item.get("id") == args.agent), None) if args.agent else next(iter(configs), None)
     if selected is None:
         parser.error("No matching saved LiDAR agent found")
@@ -129,7 +133,9 @@ def main():
     print(f"topic_frames={dict(topic_frames)} nonempty_object_frames={dict(topic_nonempty)}")
     print(f"tracking_parser={dict(tracking_valid)} tracking_classes={dict(tracking_classes)} tracking_sensors={dict(tracking_sensors)}")
     for frame_id, count in frames.most_common():
-        print(f"frame_id={frame_id} frames={count} agent={agents.get(frame_id, '<no matching agent>')}")
+        print(f"frame_id={frame_id} frames={count} agent={', '.join(frame_agents.get(frame_id, [])) or '<no matching agent>'}")
+    for sensor_id, count in tracking_sensors.most_common():
+        print(f"object_sensor_id={sensor_id} objects={count} agent={', '.join(sensor_agents.get(sensor_id, [])) or '<no matching agent>'}")
     print(f"object_counts={dict(object_counts)} payload_shapes={dict(shapes)}")
     print(f"object_classes={dict(classes)}")
     for frame_id, samples in frame_times.items():
