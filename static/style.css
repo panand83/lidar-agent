@@ -23,6 +23,19 @@ canvas.editing { cursor: crosshair; }
 #calibrationNext:disabled{opacity:.55;cursor:default}
 #captureStatus,#mapResult{color:var(--yellow);font-size:12px;line-height:1.4;margin:9px 0}
 .integrationRow { padding: 14px 0; border-bottom: 1px solid var(--border); }
+.integrationSetup { border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+.integrationSetup summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+.integrationSetupBody label { margin: 9px 0; }
+.integrationConfigActions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-top: 10px; }
+.integrationConfigActions button { min-width: 0; padding: 7px 3px; font-size: 11px; white-space: nowrap; }
+.integrationFlasherSign { width: 56px; height: 38px; flex: 0 0 56px; border: 1px solid #b92727; border-radius: 4px; background: #000 url('/wrong-way-sign.png') center / 200% auto no-repeat; visibility: hidden; }
+.integrationFlasherSign.isActive { visibility: visible; animation: flasherSignBlink .9s steps(1, end) infinite; }
+@keyframes flasherSignBlink { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .integrationFlasherSign.isActive { animation: none; } }
+.integrationRow.eventFlash { background: #ffdf3a; border-color: #fff3a2; color: #17202d; box-shadow: inset 0 0 0 1px #fff3a2, 0 0 14px #ffdf3a88; }
+.integrationRow.eventFlash .integrationRoute,.integrationRow.eventFlash .integrationDetail { color: #17202d; }
+.integrationRow.eventFlash .integrationState { border-color: #856610; }
+.integrationRow.eventFlash .integrationActions button { background: #fff1a4; border-color: #ac861d; color: #17202d; }
 .integrationAlert { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: 8px; line-height: 1.4; }
 .integrationAlertIdentity,.integrationAlertTiming { min-width: 0; }
 .integrationAlertIdentity strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
@@ -41,7 +54,10 @@ canvas.editing { cursor: crosshair; }
 .integrationState.isEnabled { background: #123d36; color: #87e9ca; border: 1px solid #277d68; }
 .integrationState.isDisabled { background: #263147; color: #c2cee3; border: 1px solid #52627f; }
 .integrationActions { display: flex; gap: 5px; flex: 0 0 auto; }
-.integrationActions button { padding: 5px 7px; font-size: 12px; }
+.integrationActions .iconButton { width: 30px; height: 30px; padding: 5px; display: grid; place-items: center; background: #122440; border-color: #35527a; }
+.integrationActions .iconButton svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.integrationActions .iconButton.danger { background: #1a1b32; border-color: #a54460; color: #ff667c; }
+.integrationActions .iconButton.danger:hover { background: #a8324a; border-color: #a8324a; color: #fff; }
 .integrationRoute { color: var(--text); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 .integrationModalBox { width: min(430px, calc(100vw - 30px)); max-height: calc(100vh - 30px); overflow: auto; }
 .integrationModalBox .row { justify-content: flex-end; margin-bottom: 0; }

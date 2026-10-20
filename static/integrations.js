@@ -1,6 +1,48 @@
 /* Per-LiDAR alert mappings; the detection rule remains unchanged. */
 const integrationRenderFields = renderFields;
 let integrationCatalogSignature = '';
+const integrationActivity = {lidarId: null, seen: new Map(), alertUntil: new Map(), flasherUntil: new Map()};
+
+function renderIntegrationActivity() {
+  const now = Date.now();
+  for (const row of $('integrationList').querySelectorAll('.integrationRow[data-mapping-id]')) {
+    const id = row.dataset.mappingId;
+    row.classList.toggle('eventFlash', (integrationActivity.alertUntil.get(id) || 0) > now);
+    const sign = row.querySelector('.integrationFlasherSign');
+    const active = (integrationActivity.flasherUntil.get(id) || 0) > now;
+    sign.classList.toggle('isActive', active);
+    sign.setAttribute('aria-hidden', String(!active));
+  }
+}
+
+function updateIntegrationSignals() {
+  const live = state.live?.integration_signals;
+  const full = state.snapshot?.integration_signals;
+  const signals = live && full && live.observed_at != null && full.observed_at != null
+    ? (live.observed_at >= full.observed_at ? live : full) : live || full || {};
+  const alerts = signals.last_alerts || {};
+  const now = Date.now();
+  if (integrationActivity.lidarId !== state.id) {
+    integrationActivity.lidarId = state.id;
+    integrationActivity.seen = new Map(Object.entries(alerts));
+    integrationActivity.alertUntil.clear();
+    integrationActivity.flasherUntil.clear();
+  } else {
+    for (const [id, eventId] of Object.entries(alerts)) {
+      if (eventId && integrationActivity.seen.get(id) !== eventId)
+        integrationActivity.alertUntil.set(id, now + 3000);
+      integrationActivity.seen.set(id, eventId);
+    }
+  }
+  const remaining = signals.flasher_remaining_sec || {};
+  for (const id of integrationActivity.flasherUntil.keys())
+    if (!(id in remaining)) integrationActivity.flasherUntil.delete(id);
+  for (const [id, seconds] of Object.entries(remaining))
+    integrationActivity.flasherUntil.set(id, now + Number(seconds) * 1000);
+  renderIntegrationActivity();
+}
+
+setInterval(renderIntegrationActivity, 200);
 
 function integrationConfig() {
   return state.config?.integrations;
@@ -164,6 +206,7 @@ function renderIntegrationFields() {
   for (const mapping of config.mappings || []) {
     const row = document.createElement('div');
     row.className = 'integrationRow';
+    row.dataset.mappingId = mapping.id;
     const heading = document.createElement('div');
     heading.className = 'panelHeading';
     const identity = document.createElement('div');
@@ -176,21 +219,20 @@ function renderIntegrationFields() {
     identity.append(title, stateLabel);
     const actions = document.createElement('div');
     actions.className = 'integrationActions';
-    const edit = document.createElement('button');
-    edit.textContent = 'Edit';
-    edit.title = 'Edit alert mapping';
-    edit.onclick = () => openIntegrationModal(mapping);
-    const remove = document.createElement('button');
-    remove.className = 'danger';
-    remove.textContent = 'Delete';
-    remove.title = 'Delete alert mapping';
-    remove.onclick = () => {
+    const edit = iconButton('edit', 'Edit alert mapping', () => openIntegrationModal(mapping));
+    const remove = iconButton('delete', 'Delete alert mapping', () => {
       config.mappings = config.mappings.filter(item => item.id !== mapping.id);
       dirty();
       renderIntegrationFields();
-    };
+    }, true);
     actions.append(edit, remove);
-    heading.append(identity, actions);
+    const sign = document.createElement('span');
+    sign.className = 'integrationFlasherSign';
+    sign.title = 'Wrong-way flasher active';
+    sign.setAttribute('role', 'img');
+    sign.setAttribute('aria-label', 'Wrong-way flasher active');
+    sign.setAttribute('aria-hidden', 'true');
+    heading.append(identity, sign, actions);
     row.append(heading);
     const localRules = integrationRuleIds(mapping).map(id => (state.config.rules || []).find(rule => rule.id === id)?.name || 'Missing LiDAR rule');
     const external = rules[mapping.external_rule_id];
@@ -216,6 +258,7 @@ function renderIntegrationFields() {
     row.append(detail);
     root.append(row);
   }
+  renderIntegrationActivity();
 }
 
 for (const [field, key] of [['subalertTopic', 'subalert_topic'], ['ruleConfigTopic', 'rule_topic'], ['rseConfigTopic', 'rse_topic']]) {
@@ -269,7 +312,8 @@ refreshIntegration.onclick = async () => {
   } catch (error) { message(error.message); }
   finally { refreshIntegration.disabled = false; }
 };
-$('integrationStatus').before(refreshIntegration);
+$('integrationConfigActions').append(refreshIntegration);
+refreshIntegration.textContent = 'Refresh';
 $('addIntegration').onclick = () => {
   openIntegrationModal();
 };
@@ -287,4 +331,9 @@ renderStatus = function () {
     integrationCatalogSignature = signature;
     renderIntegrationFields();
   }
+};
+const integrationUpdateRuleAlerts = updateRuleAlerts;
+updateRuleAlerts = function () {
+  integrationUpdateRuleAlerts();
+  updateIntegrationSignals();
 };

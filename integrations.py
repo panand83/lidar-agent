@@ -13,6 +13,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
 LOG = logging.getLogger(__name__)
@@ -132,6 +133,17 @@ def device_url(device):
     return f"http://{address}{device['path']}"
 
 
+def flasher_duration_seconds(device):
+    if device.get("type") != "Flasher":
+        return 0
+    values = parse_qs(urlsplit(device.get("path", "")).query).get("pulseTime1", [])
+    try:
+        duration = float(values[0])
+    except (IndexError, TypeError, ValueError):
+        return 0
+    return duration if math.isfinite(duration) and 0 < duration <= 3600 else 0
+
+
 def send_device(device):
     request = Request(device_url(device), headers={"Cache-Control": "no-cache"}, method="GET")
     with urlopen(request, timeout=5) as response:
@@ -160,6 +172,7 @@ class IntegrationService:
         self.subalert_debounce = {}
         self.debounce_expirations = []
         self.alerts = {}
+        self.flasher_until = {}
         self.started = False
         if start_workers:
             self.start()
@@ -199,6 +212,21 @@ class IntegrationService:
     def recent_alerts(self, lidar_id):
         with self.condition:
             return list(self.alerts.get(lidar_id, ()))
+
+    def signals(self, lidar_id):
+        with self.condition:
+            latest = {}
+            for alert in self.alerts.get(lidar_id, ()):
+                mapping_id = alert.get("mapping_id")
+                if mapping_id and mapping_id not in latest:
+                    latest[mapping_id] = alert.get("source_event_id")
+            now = time.monotonic()
+            active = self.flasher_until.get(lidar_id, {})
+            remaining = {mapping_id: round(until - now, 3) for mapping_id, until in active.items()
+                         if until > now}
+            self.flasher_until[lidar_id] = {mapping_id: until for mapping_id, until in active.items()
+                                           if until > now}
+            return {"observed_at": now, "last_alerts": latest, "flasher_remaining_sec": remaining}
 
     def reset_alerts(self, lidar_id):
         with self.condition:
@@ -310,7 +338,8 @@ class IntegrationService:
                     interval = int(integrations.get("illuminator_interval_sec", 5))
                     for index in range(repetitions):
                         self._enqueue({"kind": "device", "lidar_id": lidar_id, "lidar_name": lidar_name,
-                                       "rule_name": rule_name, "vehicle_id": payload["vehicleId"], "created": now,
+                                       "mapping_id": mapping["id"], "rule_name": rule_name,
+                                       "vehicle_id": payload["vehicleId"], "created": now,
                                        "generation": generation,
                                        "attempt": 0, "device": device,
                                        "expires": now + interval * 11 + JOB_TTL_SEC if expected == "Illuminator" else now + JOB_TTL_SEC},
@@ -324,6 +353,7 @@ class IntegrationService:
             with self.condition:
                 self.alerts.setdefault(lidar_id, deque(maxlen=200)).appendleft({
                     "timestamp": payload["timestamp"], "rule_name": rule_name,
+                    "mapping_id": mapping["id"],
                     "source_event_id": event.get("event_id"), "event_id": payload["eventId"],
                     "vehicle_id": payload["vehicleId"], "external_rule_name": rule["name"],
                     "zone": mapping["zone"], "topic": integrations.get("subalert_topic", "subalert")})
@@ -375,6 +405,12 @@ class IntegrationService:
             elif job["kind"] == "device":
                 self.http_get(job["device"])
                 device = job["device"]
+                duration = flasher_duration_seconds(device)
+                if duration and job.get("mapping_id"):
+                    with self.condition:
+                        active = self.flasher_until.setdefault(job["lidar_id"], {})
+                        mapping_id = job["mapping_id"]
+                        active[mapping_id] = max(active.get(mapping_id, 0), time.monotonic() + duration)
                 level = logging.INFO if device.get("type") == "Flasher" else logging.DEBUG
                 LOG.log(level, "Device request succeeded %s type=%s device=%s", job_log_context(job),
                         device.get("type"), device.get("name") or "Unnamed device")

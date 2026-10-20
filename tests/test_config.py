@@ -78,11 +78,13 @@ class ConfigTests(unittest.TestCase):
                                     status=lambda: {"resync_pending": False})
         alerts = [{"event_id": "alert-one", "rule_name": "Crossing"}]
         service = SimpleNamespace(recent_alerts=Mock(return_value=alerts),
+                                  signals=Mock(return_value={"last_alerts": {}, "flasher_remaining_sec": {}}),
                                   snapshot=Mock(return_value={"rules": {}, "devices": {}, "status": {}}))
         handler = SimpleNamespace(path="/api/lidars/live", send_json=Mock())
         with patch.object(app, "PROCESSORS", {"live": processor}), patch.object(app, "INTEGRATIONS", service):
             app.Handler.do_GET(handler)
         self.assertEqual(handler.send_json.call_args.args[0]["integration_alerts"], alerts)
+        self.assertEqual(handler.send_json.call_args.args[0]["integration_signals"]["last_alerts"], {})
 
     def test_backup_get_returns_saved_per_lidar_file(self):
         with tempfile.TemporaryDirectory() as directory:

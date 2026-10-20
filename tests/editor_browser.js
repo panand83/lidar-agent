@@ -225,6 +225,76 @@ async function main() {
       noSubalertId:true,time:true,rule:'Crossing',vehicleFits:true,separated:true,
       hover:'External rule: Wrong Way\nZone: 1\nTopic: subalert',
       confirmation:'Wrong-way vehicle | Confirmation Zone',empty:true});
+    const integrationActivity = await evaluate(`(async () => {
+      const setup = document.getElementById('integrationSetup');
+      const collapsed = !setup.open;
+      setup.open = true;
+      const actions = document.getElementById('integrationConfigActions');
+      const buttons = [...actions.querySelectorAll('button')];
+      const sameRow = buttons.length === 3 && buttons.every(button =>
+        Math.abs(button.getBoundingClientRect().top - buttons[0].getBoundingClientRect().top) < 2 &&
+        button.getBoundingClientRect().right <= actions.getBoundingClientRect().right + 1);
+      const oldMappings = state.config.integrations.mappings;
+      const oldCatalog = state.snapshot.integration_catalog;
+      const oldSignals = state.snapshot.integration_signals;
+      const oldLive = state.live;
+      try {
+        state.config.integrations.mappings = [{id:'mapping-ui',enabled:true,zone:1,
+          rule_ids:['rule-test'],external_rule_id:'external'}];
+        state.snapshot.integration_catalog = {rules:{external:{name:'Wrong Way',lights:[]}},
+          devices:{},status:{}};
+        state.live = {...(state.live||{}),integration_signals:{last_alerts:{},flasher_remaining_sec:{}}};
+        document.querySelector('[data-tab="integrations"]').click();
+        updateIntegrationSignals();
+        const row = document.querySelector('#integrationList .integrationRow');
+        const sign = row.querySelector('.integrationFlasherSign');
+        const mappingActions = [...row.querySelectorAll('.integrationActions button')];
+        const matchingIcons = mappingActions.length === 2 && mappingActions.every(button =>
+          button.classList.contains('iconButton') && !!button.querySelector('svg')) &&
+          mappingActions[0].getAttribute('aria-label') === 'Edit alert mapping' &&
+          mappingActions[1].getAttribute('aria-label') === 'Delete alert mapping' &&
+          mappingActions[1].classList.contains('danger');
+        mappingActions[0].click();
+        const editOpensModal = !document.getElementById('integrationModal').hidden;
+        closeIntegrationModal();
+        state.live.integration_signals = {last_alerts:{'mapping-ui':'source-1'},flasher_remaining_sec:{}};
+        updateIntegrationSignals();
+        const highlighted = row.classList.contains('eventFlash');
+        const signBeforeSuccess = !sign.classList.contains('isActive');
+        state.live.integration_signals = {last_alerts:{'mapping-ui':'source-1'},
+          flasher_remaining_sec:{'mapping-ui':1}};
+        updateIntegrationSignals();
+        const signActive = sign.classList.contains('isActive') &&
+          getComputedStyle(sign).visibility === 'visible' &&
+          getComputedStyle(sign).backgroundImage.includes('wrong-way-sign.png');
+        const originalNow = Date.now;
+        Date.now = () => originalNow() + 1100;
+        renderIntegrationActivity();
+        const signExpired = !sign.classList.contains('isActive');
+        Date.now = originalNow;
+        state.snapshot.integration_signals = {observed_at:2,last_alerts:{'mapping-ui':'source-1'},
+          flasher_remaining_sec:{}};
+        state.live.integration_signals = {observed_at:1,last_alerts:{'mapping-ui':'source-1'},
+          flasher_remaining_sec:{'mapping-ui':10}};
+        updateIntegrationSignals();
+        const staleLiveIgnored = !sign.classList.contains('isActive');
+        const asset = await fetch('/wrong-way-sign.png');
+        return {collapsed,sameRow,matchingIcons,editOpensModal,highlighted,signBeforeSuccess,signActive,signExpired,staleLiveIgnored,
+          assetStatus:asset.status,assetType:asset.headers.get('content-type')};
+      } finally {
+        state.config.integrations.mappings = oldMappings;
+        state.snapshot.integration_catalog = oldCatalog;
+        state.snapshot.integration_signals = oldSignals;
+        state.live = oldLive;
+        setup.open = false;
+        integrationActivity.alertUntil.clear();
+        integrationActivity.flasherUntil.clear();
+        renderIntegrationFields();
+      }
+    })()`);
+    assert.deepEqual(integrationActivity, {collapsed:true,sameRow:true,matchingIcons:true,editOpensModal:true,highlighted:true,
+      signBeforeSuccess:true,signActive:true,signExpired:true,staleLiveIgnored:true,
+      assetStatus:200,assetType:'image/png'});
     const recentEvents = await evaluate(`(() => {
       document.querySelector('[data-tab="events"]').click();
       state.snapshot.events = [
@@ -336,7 +406,7 @@ async function main() {
         placeholder:document.getElementById('sensorId').placeholder};
     })()`);
     assert.deepEqual(sensorFilter, {visible:true,mode:'object_sensor_id',placeholder:'Required object sensor_id'});
-    console.log(JSON.stringify({modalAligned: true, draggable: true, heading, closed, escaped, disabledHeading, selected, dragged, draft, integrationAlerts, recentEvents, occupancyHighlight, canceledToggles, sensorFilter}));
+    console.log(JSON.stringify({modalAligned: true, draggable: true, heading, closed, escaped, disabledHeading, selected, dragged, draft, integrationAlerts, integrationActivity, recentEvents, occupancyHighlight, canceledToggles, sensorFilter}));
     socket.close();
   } finally { browser.kill(); }
 }

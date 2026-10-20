@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import app
 from engine import LidarEngine
-from integrations import IntegrationService, VEHICLE_ID_EPOCH_MS, parse_rse_config, parse_rule_config, subalert
+from integrations import IntegrationService, VEHICLE_ID_EPOCH_MS, flasher_duration_seconds, parse_rse_config, parse_rule_config, subalert
 
 
 GEO = {"lat": 30.4, "lon": -84.2, "heading": 0, "origin_x": 0,
@@ -22,7 +22,7 @@ MAPPING = {"id": "mapping-1", "enabled": True, "use_case": "wrongway_vehicle", "
            "rule_id": "local-rule", "external_rule_id": "external-rule"}
 RSE = {"list": [{"_id": "flasher-1", "deviceTypeName": "Flasher",
                  "make": "Wrong Way Flasher", "friendlyUniqueId": "rse-000003",
-                 "ssh": {"host": "192.168.1.10"}, "accessPoint": "/state.xml?on=1"},
+                 "ssh": {"host": "192.168.1.10"}, "accessPoint": "/state.xml?pulseTime1=30&relay1=2"},
                 {"_id": "light-1", "deviceTypeName": "Illuminator",
                  "ssh": {"host": "192.168.1.11"}, "accessPoint": "/on"}]}
 RULE = {"list": [{"type": "wrongway", "_id": "external-rule", "name": "Wrong Way Vehicle", "isActive": True,
@@ -83,6 +83,55 @@ class IntegrationTests(unittest.TestCase):
         hostile = {"list": [{"_id": "bad", "deviceTypeName": "Flasher",
                              "ssh": {"host": "example.com"}, "accessPoint": "//evil"}]}
         self.assertEqual(parse_rse_config(hostile), {})
+
+    def test_flasher_duration_uses_configured_api_pulse_time(self):
+        device = parse_rse_config(RSE)["flasher-1"]
+        self.assertEqual(flasher_duration_seconds(device), 30)
+        self.assertEqual(flasher_duration_seconds({**device, "path": "/state.xml?relay1=2"}), 0)
+        self.assertEqual(flasher_duration_seconds({**device, "path": "/state.xml?pulseTime1=nan"}), 0)
+        self.assertEqual(flasher_duration_seconds({**device, "path": "/state.xml?pulseTime1=0"}), 0)
+
+    def test_mapping_signal_and_flasher_activation_follow_device_success(self):
+        service = IntegrationService(http_get=lambda device: None, start_workers=False)
+        service.ingest("lidar-a", "rule", RULE)
+        service.ingest("lidar-a", "rse", RSE)
+        config = {"map_alignment": {"geo": GEO}, "mqtt": {"qos": 1},
+                  "integrations": {"mappings": [MAPPING]}}
+        service.dispatch("lidar-a", config, EVENT, FakeClient())
+        self.assertEqual(service.signals("lidar-a")["last_alerts"], {"mapping-1": "event-one"})
+        self.assertEqual(service.signals("lidar-a")["flasher_remaining_sec"], {})
+        job = service.device_pending.get_nowait()
+        started = time.monotonic()
+        with patch("integrations.time.monotonic", return_value=started):
+            service._run_job(job)
+            self.assertEqual(service.signals("lidar-a")["flasher_remaining_sec"], {"mapping-1": 30})
+        with patch("integrations.time.monotonic", return_value=started + 31):
+            self.assertEqual(service.signals("lidar-a")["flasher_remaining_sec"], {})
+
+    def test_failed_flasher_does_not_show_active_signal(self):
+        service = IntegrationService(http_get=lambda device: (_ for _ in ()).throw(OSError("failed")),
+                                     start_workers=False)
+        service.ingest("lidar-a", "rule", RULE)
+        service.ingest("lidar-a", "rse", RSE)
+        config = {"map_alignment": {"geo": GEO}, "mqtt": {"qos": 1},
+                  "integrations": {"mappings": [MAPPING]}}
+        service.dispatch("lidar-a", config, EVENT, FakeClient())
+        service._run_job(service.device_pending.get_nowait())
+        self.assertEqual(service.signals("lidar-a")["flasher_remaining_sec"], {})
+
+    def test_flasher_signal_is_specific_to_its_mapping(self):
+        service = IntegrationService(http_get=lambda device: None, start_workers=False)
+        service.ingest("lidar-a", "rule", RULE)
+        service.ingest("lidar-a", "rse", RSE)
+        other = {**MAPPING, "id": "mapping-2"}
+        config = {"map_alignment": {"geo": GEO}, "mqtt": {"qos": 1},
+                  "integrations": {"mappings": [MAPPING, other]}}
+        service.dispatch("lidar-a", config, EVENT, FakeClient())
+        self.assertEqual(set(service.signals("lidar-a")["last_alerts"]), {"mapping-1", "mapping-2"})
+        job = service.device_pending.get_nowait()
+        self.assertEqual(job["mapping_id"], "mapping-1")
+        service._run_job(job)
+        self.assertEqual(set(service.signals("lidar-a")["flasher_remaining_sec"]), {"mapping-1"})
 
     def test_catalog_import_is_validated_and_cached_separately(self):
         with tempfile.TemporaryDirectory() as directory:

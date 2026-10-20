@@ -543,11 +543,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
-        if path in ("/", "/index.html", "/app.js", "/mapview.js", "/kyra-editor.js", "/integrations.js", "/style.css", "/kyra-logo.png"):
+        if path in ("/", "/index.html", "/app.js", "/mapview.js", "/kyra-editor.js", "/integrations.js", "/style.css", "/kyra-logo.png", "/wrong-way-sign.png"):
             name = "index.html" if path in ("/", "/index.html") else path[1:]
             body = (ROOT / "static" / name).read_bytes()
             self.send_response(200)
-            content_type = {"index.html": "text/html", "app.js": "text/javascript", "mapview.js": "text/javascript", "kyra-editor.js": "text/javascript", "integrations.js": "text/javascript", "style.css": "text/css", "kyra-logo.png": "image/png"}[name]
+            content_type = {"index.html": "text/html", "app.js": "text/javascript", "mapview.js": "text/javascript", "kyra-editor.js": "text/javascript", "integrations.js": "text/javascript", "style.css": "text/css", "kyra-logo.png": "image/png", "wrong-way-sign.png": "image/png"}[name]
             self.send_header("Content-Type", content_type if name.endswith(".png") else content_type + "; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
@@ -596,6 +596,7 @@ class Handler(BaseHTTPRequestHandler):
             after_event_id = parse_qs(urlparse(self.path).query).get("after", [None])[0]
             with live_processor.lock:
                 live = live_processor.engine.live_snapshot(after_event_id)
+            live["integration_signals"] = INTEGRATIONS.signals(parts[2])
             return self.send_json(live)
         if processor:
             with processor.lock:
@@ -605,6 +606,7 @@ class Handler(BaseHTTPRequestHandler):
                     snapshot["status"]["tracks"] = 0
                     snapshot["tracks"] = []
                 snapshot["integration_alerts"] = INTEGRATIONS.recent_alerts(parts[2])
+                snapshot["integration_signals"] = INTEGRATIONS.signals(parts[2])
             snapshot["integration_catalog"] = INTEGRATIONS.snapshot(parts[2])
             return self.send_json(snapshot)
         self.send_json({"error": "Not found"}, 404)
